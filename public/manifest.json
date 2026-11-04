@@ -1,0 +1,31 @@
+{
+  "id": "/",
+  "name": "BuildMate — Construction Workforce & Site Operations",
+  "short_name": "BuildMate",
+  "description": "Construction Labour & Employee Management System with 6-Role Supabase Auth, Offline IndexedDB Attendance & Task Sync, and Real-Time Operations.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#0F172A",
+  "background_color": "#F8FAFC",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
