@@ -8,6 +8,7 @@ import {
   LabourRecord,
   HrManagerRecord,
   SiteSupervisorRecord,
+  AccountantProfileRecord,
   ProjectRecord,
   SiteRecord,
   TaskRecord,
@@ -15,6 +16,7 @@ import {
   SalaryRecord,
   MaterialRecord,
   MaterialRequestRecord,
+  SupplierRecord,
   EmployeeProjectAssignment,
   LabourProjectAssignment,
   WageType,
@@ -353,7 +355,8 @@ export function authenticateSixRoleCredentials(params: {
   if (codeMatch) {
     const prefix = codeMatch[1].toUpperCase();
     const digits = codeMatch[2];
-    const derivedUserId = `${prefix === 'HRM' ? 'HR' : prefix}${digits}`;
+    const derivedUserId = `${prefix}${digits}`;
+    const canonicalCompareCode = `${prefix === 'HRM' ? 'HR' : prefix}${digits}`;
 
     const prefixToTable: Record<string, RoleTableName> = {
       ADM: 'admins',
@@ -369,7 +372,7 @@ export function authenticateSixRoleCredentials(params: {
 
     if (!cleanId.includes('@')) {
       const normalizedTypedCode = cleanId.toUpperCase().replace(/^HRM/, 'HR');
-      if (normalizedTypedCode !== derivedUserId) {
+      if (normalizedTypedCode !== canonicalCompareCode) {
         return {
           status: 'DENIED_NO_PROFILE',
           matchedTables: [targetTable],
@@ -381,7 +384,8 @@ export function authenticateSixRoleCredentials(params: {
     const dirMatch = SIX_ROLE_ACCOUNT_DIRECTORY.find(
       (acc) =>
         acc.work_email.toLowerCase() === normId ||
-        acc.user_id.toLowerCase() === normId
+        acc.user_id.toLowerCase() === normId ||
+        acc.user_id.toLowerCase() === derivedUserId.toLowerCase()
     );
     if (dirMatch) {
       return resolveSixRoleAuthProfile({
@@ -671,6 +675,9 @@ export function normalizeLabourerRow(row: Record<string, any>, fallbackIndex = 1
       (typeof row.labour_code === 'string'
         ? parseInt(row.labour_code.replace(/\D+/g, ''), 10)
         : 0) ||
+      (typeof row.user_id === 'string' && /^LAB\d+$/i.test(row.user_id)
+        ? 100 + parseInt(row.user_id.replace(/\D+/g, ''), 10)
+        : 0) ||
       100 + fallbackIndex
   );
   const isActive = row.is_active !== undefined ? Boolean(row.is_active) : row.status !== 'INACTIVE';
@@ -685,24 +692,32 @@ export function normalizeLabourerRow(row: Record<string, any>, fallbackIndex = 1
   const wageRate = Number(row.wage_rate || 850);
   const wageType: WageType =
     row.wage_type === 'HOURLY' || row.wage_type === 'CONTRACT' ? row.wage_type : 'DAILY';
+  const skillOrTrade = row.skill_or_trade || row.skill || row.trade || 'Mason';
+  const rawIndex = numericId > 100 ? numericId - 100 : numericId;
+  const resolvedUserId =
+    row.user_id ||
+    (typeof row.labour_code === 'string' && /^LAB\d+$/i.test(row.labour_code)
+      ? row.labour_code.toUpperCase()
+      : `LAB${String(Math.max(1, rawIndex)).padStart(3, '0')}`);
 
   return {
     labour_id: numericId,
-    user_id: row.user_id || null,
+    user_id: resolvedUserId,
     name: fullName,
     full_name: fullName,
     work_email: row.work_email || row.email || '',
     phone: row.phone || '',
     emergency_contact: row.emergency_contact || '',
     address: row.address || 'Site Labour Camp',
-    skill: row.skill || row.trade || 'Skilled Construction Operative',
-    labour_code: row.labour_code || `LAB-${numericId}`,
+    skill: skillOrTrade,
+    skill_or_trade: skillOrTrade,
+    labour_code: row.labour_code || resolvedUserId,
     assigned_site_id: row.assigned_site_id || null,
     experience_years: Number(row.experience_years ?? 4),
     wage_type: wageType,
     wage_rate: wageRate,
     hourly_rate: Number(row.hourly_rate || Math.round(wageRate / 8)),
-    auth_enabled: Boolean(row.user_id) || Boolean(row.auth_enabled),
+    auth_enabled: Boolean(resolvedUserId) || Boolean(row.auth_enabled),
     kyc_status: row.kyc_status || 'VERIFIED',
     kyc_doc_type: row.kyc_doc_type || 'Aadhaar + e-Shram',
     kyc_number: row.kyc_number || '',
@@ -715,6 +730,114 @@ export function normalizeLabourerRow(row: Record<string, any>, fallbackIndex = 1
     is_active: isActive,
     created_at: row.created_at || new Date().toISOString(),
     updated_at: row.updated_at || row.created_at || new Date().toISOString(),
+  };
+}
+
+const SUPPLIER_LEGACY_DEFAULTS: Record<
+  number,
+  {
+    supplied_materials: string;
+    quoted_rate: number;
+    quoted_qty: number;
+    rate_unit: string;
+    delivery_status: SupplierRecord['delivery_status'];
+    delivery_address: string;
+    project_id: number;
+  }
+> = {
+  1: {
+    supplied_materials: 'UltraTech OPC 53 Cement & Structural Aggregates',
+    quoted_rate: 410,
+    quoted_qty: 1200,
+    rate_unit: 'Bag (50kg)',
+    delivery_status: 'ON_SCHEDULE',
+    delivery_address: 'Hinjewadi Phase 2, Pune',
+    project_id: 1,
+  },
+  2: {
+    supplied_materials: 'TMT 550D Fe Rebars & Heavy Structural Steel',
+    quoted_rate: 62500,
+    quoted_qty: 45,
+    rate_unit: 'Metric Ton',
+    delivery_status: 'DELIVERED',
+    delivery_address: 'Bhosari MIDC, Pune',
+    project_id: 2,
+  },
+  3: {
+    supplied_materials: 'Industrial Grade Armoured Cables & Conduits',
+    quoted_rate: 1850,
+    quoted_qty: 150,
+    rate_unit: 'Coil (100m)',
+    delivery_status: 'PENDING_DELIVERY',
+    delivery_address: 'Baner-Balewadi Link Road, Pune',
+    project_id: 3,
+  },
+};
+
+export function normalizeSupplierRow(
+  row: Record<string, any>,
+  fallbackIndex = 1
+): SupplierRecord {
+  const supplierId = Number(row.supplier_id || fallbackIndex);
+  const legacyDefault = SUPPLIER_LEGACY_DEFAULTS[supplierId];
+
+  const rawRate = row.quoted_rate ?? row.quotation_rate;
+  const quotedRate =
+    rawRate !== undefined && rawRate !== null && Number(rawRate) > 0
+      ? Number(rawRate)
+      : legacyDefault?.quoted_rate ?? Number(rawRate || 0);
+
+  const rawQty = row.quoted_qty ?? row.quoted_quantity;
+  const quotedQty =
+    rawQty !== undefined && rawQty !== null && Number(rawQty) > 0
+      ? Number(rawQty)
+      : legacyDefault?.quoted_qty ?? Number(rawQty || 0);
+
+  const rawUnit = row.rate_unit || row.quotation_unit;
+  const rateUnit = String(rawUnit || legacyDefault?.rate_unit || 'unit');
+
+  const rawDeliveryStatus = String(row.delivery_status || '').trim().toUpperCase();
+  const deliveryStatus: SupplierRecord['delivery_status'] =
+    rawDeliveryStatus === 'DELIVERED' ||
+    rawDeliveryStatus === 'PENDING_DELIVERY' ||
+    rawDeliveryStatus === 'DELAYED' ||
+    rawDeliveryStatus === 'ON_SCHEDULE'
+      ? (rawDeliveryStatus as SupplierRecord['delivery_status'])
+      : (row.delivery_status as SupplierRecord['delivery_status']) ||
+        legacyDefault?.delivery_status ||
+        'PENDING_DELIVERY';
+
+  const projectId =
+    row.project_id !== undefined && row.project_id !== null && row.project_id !== ''
+      ? Number(row.project_id)
+      : legacyDefault?.project_id ?? null;
+
+  return {
+    supplier_id: supplierId,
+    supplier_name: row.supplier_name || `Supplier #${supplierId}`,
+    phone: row.phone || '',
+    address: row.address || '',
+    status: row.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE',
+    supplied_materials:
+      row.supplied_materials || legacyDefault?.supplied_materials || 'Construction Materials',
+    quotation_rate: quotedRate,
+    quoted_rate: quotedRate,
+    quotation_unit: rateUnit,
+    rate_unit: rateUnit,
+    quoted_quantity: quotedQty,
+    quoted_qty: quotedQty,
+    total_quotation_amount: Number(
+      row.total_quotation_amount ?? Math.round(quotedRate * quotedQty * 100) / 100
+    ),
+    delivery_status: deliveryStatus,
+    delivery_address:
+      row.delivery_address || legacyDefault?.delivery_address || row.address || '',
+    project_id: projectId,
+    delivery_photo_url: row.delivery_photo_url || undefined,
+    delivery_photo_bucket_path: row.delivery_photo_bucket_path || undefined,
+    delivered_by: row.delivered_by || undefined,
+    delivered_at: row.delivered_at || undefined,
+    created_at: row.created_at || new Date().toISOString(),
   };
 }
 
@@ -825,14 +948,14 @@ export const ROLE_PERMISSIONS: Record<
     canRecordAttendance: true,
     canManageTasks: true,
     canApproveLeaves: true,
-    canSubmitLeaves: true,
+    canSubmitLeaves: false,
     canManageSalary: true,
     canViewSalary: true,
     canViewMedicalNotes: true,
     canManageMaterials: true,
     canApproveMaterialRequests: true,
     canManageSuppliers: true,
-    canImportCsv: true,
+    canImportCsv: false,
   },
   'HR Manager': {
     allowedModules: [
@@ -857,14 +980,14 @@ export const ROLE_PERMISSIONS: Record<
     canRecordAttendance: true,
     canManageTasks: true,
     canApproveLeaves: true,
-    canSubmitLeaves: true,
+    canSubmitLeaves: false,
     canManageSalary: true,
     canViewSalary: true,
     canViewMedicalNotes: true,
     canManageMaterials: false,
     canApproveMaterialRequests: false,
     canManageSuppliers: false,
-    canImportCsv: true,
+    canImportCsv: false,
   },
   'Site Supervisor': {
     allowedModules: [
@@ -873,7 +996,6 @@ export const ROLE_PERMISSIONS: Record<
       'sites',
       'projects',
       'labours',
-      'employees',
       'attendance',
       'tasks',
       'leaves',
@@ -893,7 +1015,7 @@ export const ROLE_PERMISSIONS: Record<
     canManageSalary: false,
     canViewSalary: false,
     canViewMedicalNotes: false,
-    canManageMaterials: true,
+    canManageMaterials: false,
     canApproveMaterialRequests: false,
     canManageSuppliers: false,
     canImportCsv: false,
@@ -907,7 +1029,6 @@ export const ROLE_PERMISSIONS: Record<
       'attendance',
       'projects',
       'materials',
-      'suppliers',
       'reports',
       'csv_hub',
       'ai_insights',
@@ -1030,6 +1151,21 @@ export function filterTasksForRole(
   return tasks;
 }
 
+export type MaterialSubTab = 'materials' | 'requests' | 'suppliers' | 'usage';
+
+export function getAllowedMaterialTabsForRole(role: UserRole): MaterialSubTab[] {
+  if (role === 'Admin') {
+    return ['materials', 'requests', 'suppliers', 'usage'];
+  }
+  if (role === 'Accountant') {
+    return ['materials', 'usage'];
+  }
+  if (role === 'Site Supervisor') {
+    return ['requests', 'usage'];
+  }
+  return [];
+}
+
 export function getRolePermissions(role: UserRole) {
   const base = ROLE_PERMISSIONS[role] || ROLE_PERMISSIONS.Employee;
   return {
@@ -1039,7 +1175,8 @@ export function getRolePermissions(role: UserRole) {
     canViewMedicalDetails: base.canViewMedicalNotes,
     canManagePayroll: base.canManageSalary,
     canViewSalaryDetails: base.canViewSalary,
-    canRequestMaterials: base.canManageMaterials || role === 'Site Supervisor' || role === 'Admin',
+    canRequestMaterials: role === 'Site Supervisor' || role === 'Admin',
+    allowedMaterialTabs: getAllowedMaterialTabsForRole(role),
   };
 }
 
@@ -1249,6 +1386,9 @@ export function hasDuplicateAttendance(
 export function computeWorkforceStats(params: {
   employees: EmployeeRecord[];
   labours: LabourRecord[];
+  hrManagers?: HrManagerRecord[];
+  accountants?: AccountantProfileRecord[];
+  siteSupervisors?: SiteSupervisorRecord[];
   projects: ProjectRecord[];
   sites: SiteRecord[];
   empAssignments: EmployeeProjectAssignment[];
@@ -1264,6 +1404,9 @@ export function computeWorkforceStats(params: {
   const {
     employees,
     labours,
+    hrManagers,
+    accountants,
+    siteSupervisors,
     projects,
     sites,
     empAssignments,
@@ -1277,13 +1420,29 @@ export function computeWorkforceStats(params: {
     targetDate,
   } = params;
 
+  // Individual category counts (matching Supabase records and active status rules)
+  const hrCount = (hrManagers || []).filter((h) => h.is_active !== false).length;
+  const accountantCount = (accountants || []).filter((a) => a.is_active !== false).length;
+  const supervisorCount = (siteSupervisors || []).filter((s) => s.is_active !== false).length;
+  const labourCount = (labours || []).filter((l) => l.is_active !== false && (l.status as string) !== 'INACTIVE').length;
+
   const totalEmployees = employees.length;
   const totalLabours = labours.length;
-  const totalWorkforce = totalEmployees + totalLabours;
+
+  // Total Workforce calculation: Total Workforce = HR + Accountants + Site Supervisors + Labour
+  const hasCategoryBreakdown =
+    hrManagers !== undefined || accountants !== undefined || siteSupervisors !== undefined;
+
+  const totalWorkforce = hasCategoryBreakdown
+    ? hrCount + accountantCount + supervisorCount + labourCount
+    : totalEmployees + totalLabours;
 
   const activeEmployees = employees.filter((e) => e.status === 'ACTIVE' && e.is_active !== false).length;
   const activeLabours = labours.filter((l) => l.status === 'ACTIVE' && l.is_active !== false).length;
-  const activeWorkforce = activeEmployees + activeLabours;
+
+  const activeWorkforce = hasCategoryBreakdown
+    ? hrCount + accountantCount + supervisorCount + labourCount
+    : activeEmployees + activeLabours;
 
   const dateAttendance = attendance.filter((a) => a.attendance_date === targetDate);
   const presentToday = dateAttendance.filter((a) => a.status === 'PRESENT').length;
@@ -1328,11 +1487,12 @@ export function computeWorkforceStats(params: {
           )
         : 65;
 
+    const normSiteProjId = normalizeProjectId(site.project_id);
     const projLabours = labourAssignments.filter(
-      (la) => la.project_id === site.project_id && la.status === 'ACTIVE'
+      (la) => normalizeProjectId(la.project_id) === normSiteProjId && String(la.status) !== 'INACTIVE'
     ).length;
     const projEmps = empAssignments.filter(
-      (ea) => ea.project_id === site.project_id && ea.status === 'ACTIVE'
+      (ea) => normalizeProjectId(ea.project_id) === normSiteProjId && String(ea.status) !== 'INACTIVE'
     ).length;
 
     const assignedCrew = Math.max(2, projLabours + projEmps);
@@ -1356,6 +1516,10 @@ export function computeWorkforceStats(params: {
 
   return {
     totalWorkforce,
+    hrCount,
+    accountantCount,
+    supervisorCount,
+    labourCount,
     totalEmployees,
     totalLabours,
     activeWorkforce,
@@ -1388,6 +1552,269 @@ export function computeWorkforceStats(params: {
     activeSites: sites.filter((s) => s.status === 'ACTIVE').length,
     activeProjectsCount: projects.length,
     activeSitesCount: sites.length,
+  };
+}
+
+/**
+ * Normalizes project_id values such as "PRJ001", "PRJ002", or 1, 2 into canonical numeric IDs (1, 2, 3...)
+ */
+export function normalizeProjectId(val: unknown, fallback = 1): number {
+  if (typeof val === 'number' && Number.isFinite(val) && val > 0) return val;
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    const digits = parseInt(trimmed.replace(/\D+/g, ''), 10);
+    if (Number.isFinite(digits) && digits > 0) return digits;
+  }
+  return fallback;
+}
+
+/**
+ * Normalizes employee identifiers ("EMP001", 201, or 1) to canonical 1-based employee index (1..N)
+ */
+export function canonicalEmployeeIndex(val: unknown): number {
+  if (typeof val === 'string') {
+    const digits = parseInt(val.replace(/\D+/g, ''), 10);
+    if (Number.isFinite(digits) && digits > 0) {
+      return digits > 200 ? digits - 200 : digits;
+    }
+  }
+  const num = Number(val || 0);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return num > 200 ? num - 200 : num;
+}
+
+/**
+ * Normalizes labourer identifiers ("LAB001", 101, or 1) to canonical 1-based labourer index (1..N)
+ */
+export function canonicalLabourIndex(val: unknown): number {
+  if (typeof val === 'string') {
+    const digits = parseInt(val.replace(/\D+/g, ''), 10);
+    if (Number.isFinite(digits) && digits > 0) {
+      return digits > 100 && digits < 200 ? digits - 100 : digits;
+    }
+  }
+  const num = Number(val || 0);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return num > 100 && num < 200 ? num - 100 : num;
+}
+
+export interface SupervisorAssignedEmployeeEntry {
+  employee: EmployeeRecord;
+  userIdCode: string;
+  project: ProjectRecord | undefined;
+  site: SiteRecord | undefined;
+  roleOnProject: string;
+  assignmentStatus: string;
+}
+
+export interface SupervisorAssignedLabourEntry {
+  labour: LabourRecord;
+  userIdCode: string;
+  project: ProjectRecord | undefined;
+  site: SiteRecord | undefined;
+  skillOrTrade: string;
+  assignmentStatus: string;
+}
+
+/**
+ * Resolves the logged-in Site Supervisor's strictly assigned projects, sites, site labourers, and assigned employees.
+ */
+export function resolveSupervisorAssignedScope(params: {
+  currentUser?: { user_id?: string | null; email?: string | null; name?: string | null; full_name?: string | null } | null;
+  siteSupervisors: SiteSupervisorRecord[];
+  sites: SiteRecord[];
+  projects: ProjectRecord[];
+  employees: EmployeeRecord[];
+  labours: LabourRecord[];
+  empAssignments: EmployeeProjectAssignment[];
+  labourAssignments: LabourProjectAssignment[];
+}) {
+  const {
+    currentUser,
+    siteSupervisors,
+    sites,
+    projects,
+    employees,
+    labours,
+    empAssignments,
+    labourAssignments,
+  } = params;
+
+  const userEmail = (currentUser?.email || '').trim().toLowerCase();
+  const userName = (currentUser?.full_name || currentUser?.name || '').trim().toLowerCase();
+  const userIdStr = (currentUser?.user_id || '').trim().toUpperCase();
+
+  const supervisor =
+    siteSupervisors.find((s) => {
+      const supCode = (s.user_id || s.employee_code || '').trim().toUpperCase();
+      const supEmail = (s.work_email || s.email || '').trim().toLowerCase();
+      const supName = (s.full_name || s.name || '').trim().toLowerCase();
+      return (
+        (userIdStr && supCode === userIdStr) ||
+        (userEmail && supEmail === userEmail) ||
+        (userName && supName === userName)
+      );
+    }) || siteSupervisors[0];
+
+  const supId = Number(supervisor?.supervisor_id || 1);
+
+  const directSites = sites.filter((s) => Number(s.supervisor_id) === supId);
+  const assignedSites =
+    directSites.length > 0
+      ? directSites
+      : supervisor?.assigned_site_id
+      ? sites.filter((s) => Number(s.site_id) === Number(supervisor.assigned_site_id))
+      : sites.slice(0, 1);
+
+  const assignedSiteIdSet = new Set<number>(assignedSites.map((s) => Number(s.site_id)));
+  const assignedProjectIdSet = new Set<number>(
+    assignedSites.map((s) => normalizeProjectId(s.project_id))
+  );
+
+  const assignedProjects = projects.filter((p) =>
+    assignedProjectIdSet.has(normalizeProjectId(p.project_id))
+  );
+
+  // Build assigned employees list (without duplicates)
+  const seenEmpKeys = new Set<number>();
+  const assignedEmployees: SupervisorAssignedEmployeeEntry[] = [];
+
+  for (const ea of empAssignments) {
+    const projNorm = normalizeProjectId(ea.project_id);
+    if (!assignedProjectIdSet.has(projNorm)) continue;
+    const empIdx = canonicalEmployeeIndex(ea.employee_id);
+    const emp = employees.find(
+      (e) =>
+        canonicalEmployeeIndex(e.user_id || e.employee_code || e.employee_id) === empIdx ||
+        Number(e.employee_id) === Number(ea.employee_id)
+    );
+    if (!emp) continue;
+    const uniqueKey = canonicalEmployeeIndex(emp.user_id || emp.employee_id) || emp.employee_id;
+    if (seenEmpKeys.has(uniqueKey)) continue;
+    seenEmpKeys.add(uniqueKey);
+
+    const project = projects.find((p) => normalizeProjectId(p.project_id) === projNorm);
+    const site =
+      assignedSites.find((s) => normalizeProjectId(s.project_id) === projNorm) || assignedSites[0];
+    const code =
+      emp.user_id ||
+      emp.employee_code ||
+      `EMP${String(uniqueKey).padStart(3, '0')}`;
+
+    assignedEmployees.push({
+      employee: emp,
+      userIdCode: code,
+      project,
+      site,
+      roleOnProject: (ea as any).role_on_project || emp.designation || 'Site Engineer',
+      assignmentStatus: ea.status || emp.status || 'ACTIVE',
+    });
+  }
+
+  // Fallback to site_id only when empAssignments is empty
+  if (empAssignments.length === 0) {
+    for (const emp of employees) {
+      const empSiteId = (emp as any).site_id;
+      if (empSiteId && assignedSiteIdSet.has(Number(empSiteId))) {
+        const uniqueKey = canonicalEmployeeIndex(emp.user_id || emp.employee_id) || emp.employee_id;
+        if (seenEmpKeys.has(uniqueKey)) continue;
+        seenEmpKeys.add(uniqueKey);
+        const site = assignedSites.find((s) => Number(s.site_id) === Number(empSiteId));
+        const project = site
+          ? projects.find((p) => normalizeProjectId(p.project_id) === normalizeProjectId(site.project_id))
+          : assignedProjects[0];
+        const code =
+          emp.user_id ||
+          emp.employee_code ||
+          `EMP${String(uniqueKey).padStart(3, '0')}`;
+        assignedEmployees.push({
+          employee: emp,
+          userIdCode: code,
+          project,
+          site,
+          roleOnProject: emp.designation || 'Site Engineer',
+          assignmentStatus: emp.status || 'ACTIVE',
+        });
+      }
+    }
+  }
+
+  // Build assigned site labourers list (without duplicates)
+  const seenLabKeys = new Set<number>();
+  const assignedLabours: SupervisorAssignedLabourEntry[] = [];
+
+  for (const la of labourAssignments) {
+    const projNorm = normalizeProjectId(la.project_id);
+    if (!assignedProjectIdSet.has(projNorm)) continue;
+    const labIdx = canonicalLabourIndex(la.labour_id);
+    const lab = labours.find(
+      (l) =>
+        canonicalLabourIndex(l.user_id || l.labour_code || l.labour_id) === labIdx ||
+        Number(l.labour_id) === Number(la.labour_id)
+    );
+    if (!lab) continue;
+    const uniqueKey = canonicalLabourIndex(lab.user_id || lab.labour_id) || lab.labour_id;
+    if (seenLabKeys.has(uniqueKey)) continue;
+    seenLabKeys.add(uniqueKey);
+
+    const project = projects.find((p) => normalizeProjectId(p.project_id) === projNorm);
+    const site =
+      assignedSites.find((s) => normalizeProjectId(s.project_id) === projNorm) || assignedSites[0];
+    const code =
+      lab.user_id ||
+      lab.labour_code ||
+      `LAB${String(uniqueKey).padStart(3, '0')}`;
+
+    assignedLabours.push({
+      labour: lab,
+      userIdCode: code,
+      project,
+      site,
+      skillOrTrade: lab.skill_or_trade || lab.skill || 'Skilled Mason',
+      assignmentStatus: la.status || lab.status || 'ACTIVE',
+    });
+  }
+
+  // Fallback to site_id only when labourAssignments is empty
+  if (labourAssignments.length === 0) {
+    for (const lab of labours) {
+      if (lab.site_id && assignedSiteIdSet.has(Number(lab.site_id))) {
+        const uniqueKey = canonicalLabourIndex(lab.user_id || lab.labour_id) || lab.labour_id;
+        if (seenLabKeys.has(uniqueKey)) continue;
+        seenLabKeys.add(uniqueKey);
+        const site = assignedSites.find((s) => Number(s.site_id) === Number(lab.site_id));
+        const project = site
+          ? projects.find((p) => normalizeProjectId(p.project_id) === normalizeProjectId(site.project_id))
+          : assignedProjects[0];
+        const code =
+          lab.user_id ||
+          lab.labour_code ||
+          `LAB${String(uniqueKey).padStart(3, '0')}`;
+        assignedLabours.push({
+          labour: lab,
+          userIdCode: code,
+          project,
+          site,
+          skillOrTrade: lab.skill_or_trade || lab.skill || 'Skilled Mason',
+          assignmentStatus: lab.status || 'ACTIVE',
+        });
+      }
+    }
+  }
+
+  return {
+    supervisor,
+    assignedSites,
+    assignedProjects,
+    assignedSiteIdSet,
+    assignedProjectIdSet,
+    assignedEmployees,
+    assignedLabours,
+    siteLabourCount: assignedLabours.length,
+    assignedEmployeeCount: assignedEmployees.length,
+    totalAssignedCrewCount: assignedLabours.length + assignedEmployees.length,
   };
 }
 
@@ -1667,4 +2094,143 @@ export function verifyCoordinatesAgainstSiteGeofence(params: {
     message: `Geofence Boundary Violation: Current coordinates (${params.userLat.toFixed(4)}° N, ${params.userLng.toFixed(4)}° E) are ${distanceMeters.toLocaleString('en-IN')}m away from ${siteName} center, exceeding the ${allowedRadiusMeters}m geofenced boundary. Move inside the project site geofence before saving your attendance selfie.`,
   };
 }
+
+/**
+ * Exact Supabase Storage Buckets from the user's Supabase project (`uznmqmvafuyyzgshsogx`):
+ * - `Labour attendance Image`: Site Supervisor & Labourer clicked photos with location for Labour attendance
+ * - `Employees Attendence Images`: Employees clicked photos with location for Own attendance
+ * - `Accountant Attendace Images`: Accountants clicked photos with location for Own attendance
+ * - `HR Managers Attendance Images`: HR Managers clicked photos with location for Own attendance
+ * - `Admin Attendance Images`: Admins clicked photos with location for Own attendance
+ */
+export const ATTENDANCE_STORAGE_BUCKETS = {
+  LABOUR: 'Labour attendance Image',
+  EMPLOYEE: 'Employees Attendence Images',
+  ACCOUNTANT: 'Accountant Attendace Images',
+  HR_MANAGER: 'HR Managers Attendance Images',
+  ADMIN: 'Admin Attendance Images',
+  MATERIAL_DELIVERED: 'Material Delivered images',
+} as const;
+
+export function getAttendanceBucketForRole(
+  role: UserRole,
+  targetWorkerType?: 'EMPLOYEE' | 'LABOUR' | 'OWN'
+): string {
+  // Whenever a Site Supervisor, Admin, HR Manager, or Labourer captures an attendance photo for a Labourer,
+  // it saves in the "Labour attendance Image" bucket in Supabase.
+  if (targetWorkerType === 'LABOUR' || role === 'Labourer') {
+    return ATTENDANCE_STORAGE_BUCKETS.LABOUR;
+  }
+
+  switch (role) {
+    case 'Admin':
+      return ATTENDANCE_STORAGE_BUCKETS.ADMIN;
+    case 'HR Manager':
+      return ATTENDANCE_STORAGE_BUCKETS.HR_MANAGER;
+    case 'Accountant':
+      return ATTENDANCE_STORAGE_BUCKETS.ACCOUNTANT;
+    case 'Employee':
+    case 'Site Supervisor':
+    default:
+      return ATTENDANCE_STORAGE_BUCKETS.EMPLOYEE;
+  }
+}
+
+/**
+ * Calculates updated inventory quantity and stock status when a Site Supervisor records used material on site.
+ */
+export function calculateUpdatedStockAfterMaterialUsage(
+  currentStockQty: number,
+  usedQty: number
+): {
+  remainingQuantity: number;
+  status: 'IN_STOCK' | 'LOW_STOCK' | 'OUT_OF_STOCK';
+} {
+  const safeCurrent = Math.max(0, Number(currentStockQty || 0));
+  const safeUsed = Math.max(0, Number(usedQty || 0));
+  const remainingQuantity = Math.max(0, Math.round((safeCurrent - safeUsed) * 100) / 100);
+  return {
+    remainingQuantity,
+    status: deriveMaterialStockStatus(remainingQuantity),
+  };
+}
+
+/**
+ * Strict Work Email Validator: Must be valid email format and MUST end with @buildmate.ac.in
+ */
+export function isValidBuildMateEmail(email: string): boolean {
+  if (!email || typeof email !== 'string') return false;
+  const clean = email.trim().toLowerCase();
+  const regex = /^[a-zA-Z0-9._%+-]+@buildmate\.ac\.in$/i;
+  return regex.test(clean);
+}
+
+/**
+ * Validates work email field and returns a descriptive error message if invalid.
+ */
+export function validateWorkEmail(email: string): { valid: boolean; error?: string } {
+  if (!email || !email.trim()) {
+    return { valid: false, error: 'Work email address is required.' };
+  }
+  const clean = email.trim().toLowerCase();
+  if (!clean.endsWith('@buildmate.ac.in')) {
+    return {
+      valid: false,
+      error: 'Work email must end with @buildmate.ac.in (e.g. name@buildmate.ac.in).',
+    };
+  }
+  if (!isValidBuildMateEmail(clean)) {
+    return {
+      valid: false,
+      error: 'Please enter a valid work email address ending with @buildmate.ac.in.',
+    };
+  }
+  return { valid: true };
+}
+
+export function sanitize10DigitPhone(phone: string): string {
+  if (!phone || typeof phone !== 'string') return '';
+  let digits = phone.replace(/\D/g, '');
+  // If 11 digits starting with 0, strip leading 0
+  if (digits.length === 11 && digits.startsWith('0')) {
+    digits = digits.slice(1);
+  }
+  // If 12 digits starting with 91, strip country code 91
+  if (digits.length === 12 && digits.startsWith('91')) {
+    digits = digits.slice(2);
+  }
+  return digits.slice(0, 10);
+}
+
+/**
+ * Strict Phone Number Validator: Must resolve to exactly 10 numeric digits.
+ */
+export function isValid10DigitPhone(phone: string): boolean {
+  if (!phone || typeof phone !== 'string') return false;
+  let digits = phone.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('0')) {
+    digits = digits.slice(1);
+  } else if (digits.length === 12 && digits.startsWith('91')) {
+    digits = digits.slice(2);
+  }
+  return digits.length === 10;
+}
+
+/**
+ * Validates 10-digit phone number and returns a descriptive error message if invalid.
+ */
+export function validate10DigitPhone(phone: string, label = 'Phone number'): { valid: boolean; error?: string } {
+  if (!phone || !phone.trim()) {
+    return { valid: false, error: `${label} is required.` };
+  }
+  if (!isValid10DigitPhone(phone)) {
+    return {
+      valid: false,
+      error: `${label} must have exactly 10 numeric digits (e.g. 9820155110).`,
+    };
+  }
+  return { valid: true };
+}
+
+
 

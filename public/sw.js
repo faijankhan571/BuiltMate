@@ -57,10 +57,29 @@ self.addEventListener('sync', (event) => {
 });
 
 self.addEventListener('message', (event) => {
+  if (!event.data) return;
+
+  if (event.data.type === 'CACHE_OFFLINE_CHECKIN_QUEUE') {
+    event.waitUntil(
+      caches.open(CACHE_NAME).then((cache) => {
+        const response = new Response(
+          JSON.stringify({
+            queue: event.data.queue || [],
+            cachedAt: event.data.timestamp || Date.now(),
+          }),
+          {
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
+        return cache.put('/offline-checkins-cache.json', response);
+      })
+    );
+    return;
+  }
+
   if (
-    event.data &&
-    (event.data.type === 'TRIGGER_OFFLINE_SYNC' ||
-      event.data.type === 'CLIENT_READY')
+    event.data.type === 'TRIGGER_OFFLINE_SYNC' ||
+    event.data.type === 'CLIENT_READY'
   ) {
     event.waitUntil(broadcastOfflineSync());
   }

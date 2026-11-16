@@ -20,6 +20,9 @@ import {
   filterTasksForRole,
   getRolePermissions,
   isEmployeeOfficeTask,
+  validateWorkEmail,
+  validate10DigitPhone,
+  sanitize10DigitPhone,
 } from '../utils/workforceLogic';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -73,6 +76,8 @@ export const EmployeesView: React.FC = () => {
     health_checkup_date: '2026-10-01',
     medical_notes: '',
   });
+  const [formEmailError, setFormEmailError] = useState<string | null>(null);
+  const [formPhoneError, setFormPhoneError] = useState<string | null>(null);
 
   // Assign to Project Modal
   const [assignModalEmp, setAssignModalEmp] = useState<EmployeeRecord | null>(null);
@@ -86,10 +91,14 @@ export const EmployeesView: React.FC = () => {
   const [deleteTarget, setDeleteTarget] = useState<EmployeeRecord | null>(null);
 
   const filteredEmployees = employees.filter((e) => {
+    const q = search.toLowerCase();
     const matchesSearch =
-      e.name.toLowerCase().includes(search.toLowerCase()) ||
-      e.designation.toLowerCase().includes(search.toLowerCase()) ||
-      e.email.toLowerCase().includes(search.toLowerCase());
+      e.name.toLowerCase().includes(q) ||
+      e.designation.toLowerCase().includes(q) ||
+      e.email.toLowerCase().includes(q) ||
+      (e.user_id || '').toLowerCase().includes(q) ||
+      (e.employee_code || '').toLowerCase().includes(q) ||
+      e.phone.includes(search);
     const matchesStatus = statusFilter === 'ALL' || e.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
@@ -112,6 +121,8 @@ export const EmployeesView: React.FC = () => {
       health_checkup_date: new Date().toISOString().slice(0, 10),
       medical_notes: 'Pre-joining medical fitness evaluation scheduled.',
     });
+    setFormEmailError(null);
+    setFormPhoneError(null);
     setModalOpen(true);
   };
 
@@ -120,7 +131,7 @@ export const EmployeesView: React.FC = () => {
     setFormData({
       name: emp.name,
       email: emp.email,
-      phone: emp.phone,
+      phone: sanitize10DigitPhone(emp.phone),
       address: emp.address,
       designation: emp.designation,
       department: emp.department || 'Engineering & Operations',
@@ -133,17 +144,45 @@ export const EmployeesView: React.FC = () => {
       health_checkup_date: emp.health_checkup_date || '2026-10-01',
       medical_notes: emp.medical_notes || '',
     });
+    setFormEmailError(null);
+    setFormPhoneError(null);
     setModalOpen(true);
   };
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.name.trim() || !formData.email.trim()) return;
+    setFormEmailError(null);
+    setFormPhoneError(null);
+
+    const trimmedName = formData.name.trim();
+    const cleanEmail = formData.email.trim().toLowerCase();
+    const cleanPhone = sanitize10DigitPhone(formData.phone);
+
+    if (!trimmedName) return;
+
+    const emailValidation = validateWorkEmail(cleanEmail);
+    if (!emailValidation.valid) {
+      setFormEmailError(emailValidation.error || 'Work email must end with @buildmate.ac.in');
+      return;
+    }
+
+    const phoneValidation = validate10DigitPhone(cleanPhone);
+    if (!phoneValidation.valid) {
+      setFormPhoneError(phoneValidation.error || 'Phone number must have exactly 10 digits');
+      return;
+    }
+
+    const payload = {
+      ...formData,
+      name: trimmedName,
+      email: cleanEmail,
+      phone: cleanPhone,
+    };
 
     if (editingEmployee) {
-      await updateEmployee(editingEmployee.employee_id, formData);
+      await updateEmployee(editingEmployee.employee_id, payload);
     } else {
-      await addEmployee({ ...formData, user_id: null });
+      await addEmployee({ ...payload, user_id: null });
     }
     setModalOpen(false);
   };
@@ -201,9 +240,7 @@ export const EmployeesView: React.FC = () => {
               </>
             ) : (
               <>
-                Connected to <code className="font-mono text-blue-700">public.employees</code> ·
-                Includes Office Task Assignments (from HR / Admin), Attendance Rate, KYC
-                Verification &amp; Medical Fitness
+                Salaried employee workforce directory · Includes office task assignments (from HR / Admin), attendance rate, KYC verification &amp; medical fitness
               </>
             )}
           </p>
@@ -363,8 +400,8 @@ export const EmployeesView: React.FC = () => {
 
                 return (
                   <tr key={emp.employee_id} className="hover:bg-slate-50/80">
-                    <td className="py-3 px-4 font-mono font-semibold text-slate-600">
-                      #{emp.employee_id}
+                    <td className="py-3 px-4 font-mono font-semibold text-blue-700">
+                      {emp.user_id || emp.employee_code || `#${emp.employee_id}`}
                     </td>
                     <td className="py-3 px-4">
                       <div className="font-semibold text-slate-900">{emp.name}</div>
@@ -537,24 +574,54 @@ export const EmployeesView: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Email *</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block font-semibold text-slate-700">Official Email *</label>
+                    <span className="text-[10px] text-blue-700 font-mono">@buildmate.ac.in required</span>
+                  </div>
                   <input
                     type="email"
                     required
+                    pattern=".+@buildmate\.ac\.in"
+                    title="Work email must end with @buildmate.ac.in"
+                    placeholder="e.g. rohit.sharma@buildmate.ac.in"
                     value={formData.email}
-                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-300"
+                    onChange={(e) => {
+                      setFormData({ ...formData, email: e.target.value });
+                      if (formEmailError) setFormEmailError(null);
+                    }}
+                    className={`w-full px-3 py-2 rounded-lg border focus:outline-none ${
+                      formEmailError ? 'border-red-400 bg-red-50/30' : 'border-slate-300 focus:border-blue-600'
+                    }`}
                   />
+                  {formEmailError && (
+                    <p className="text-[11px] text-red-600 mt-1">{formEmailError}</p>
+                  )}
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Phone *</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block font-semibold text-slate-700">Phone Number *</label>
+                    <span className="text-[10px] text-slate-500 font-mono">10 digits only</span>
+                  </div>
                   <input
-                    type="text"
+                    type="tel"
                     required
+                    maxLength={10}
+                    pattern="[0-9]{10}"
+                    title="Phone number must have exactly 10 digits"
+                    placeholder="e.g. 9000000081"
                     value={formData.phone}
-                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-300"
+                    onChange={(e) => {
+                      const digits = e.target.value.replace(/\D/g, '').slice(0, 10);
+                      setFormData({ ...formData, phone: digits });
+                      if (formPhoneError) setFormPhoneError(null);
+                    }}
+                    className={`w-full px-3 py-2 rounded-lg border font-mono focus:outline-none ${
+                      formPhoneError ? 'border-red-400 bg-red-50/30' : 'border-slate-300 focus:border-blue-600'
+                    }`}
                   />
+                  {formPhoneError && (
+                    <p className="text-[11px] text-red-600 mt-1">{formPhoneError}</p>
+                  )}
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Designation *</label>
@@ -743,7 +810,7 @@ export const EmployeesView: React.FC = () => {
             <div className="flex items-center justify-between pb-3 border-b border-slate-200">
               <div>
                 <h3 className="font-display text-base font-bold text-slate-900">
-                  {profileEmp.name} (#{profileEmp.employee_id})
+                  {profileEmp.name} ({profileEmp.user_id || profileEmp.employee_code || `#${profileEmp.employee_id}`})
                 </h3>
                 <p className="text-slate-500">
                   {profileEmp.designation} · {profileEmp.department || 'Engineering'}
@@ -915,7 +982,7 @@ export const EmployeesView: React.FC = () => {
       <ConfirmDialog
         isOpen={Boolean(deleteTarget)}
         title="Delete Employee Record"
-        message={`Are you sure you want to permanently remove ${deleteTarget?.name} (#${deleteTarget?.employee_id}) from public.employees?`}
+        message={`Are you sure you want to permanently remove ${deleteTarget?.name} (${deleteTarget?.user_id || `#${deleteTarget?.employee_id}`}) from the employee directory?`}
         confirmLabel="Delete Employee"
         onConfirm={() => {
           if (deleteTarget) deleteEmployee(deleteTarget.employee_id);

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Plus,
   Trash2,
@@ -13,13 +13,28 @@ import {
   Navigation,
   ShieldCheck,
   AlertTriangle,
+  Wifi,
+  WifiOff,
+  RefreshCw,
+  HardDrive,
 } from 'lucide-react';
 import { useWorkforce } from '../context/WorkforceContext';
 import { AttendanceStatus, AttendanceRecord } from '../types';
 import {
   resolveSiteGeofenceConfig,
   verifyCoordinatesAgainstSiteGeofence,
+  getAttendanceBucketForRole,
 } from '../utils/workforceLogic';
+import {
+  QueuedLabourCheckIn,
+  loadLocalCheckInQueue,
+  enqueueLocalCheckIn,
+  removeLocalCheckIn,
+  saveCheckInDraftToLocalStorage,
+  loadCheckInDraftFromLocalStorage,
+  clearCheckInDraftFromLocalStorage,
+  requestServiceWorkerSync,
+} from '../utils/offlineSyncDb';
 import { ConfirmDialog } from './ConfirmDialog';
 
 function generateStampedSelfieDataUrl(params: {
@@ -116,6 +131,10 @@ export const AttendanceView: React.FC = () => {
     employees,
     labours,
     currentRole,
+    isOnline,
+    isSimulatedOffline,
+    setOfflineSimulation,
+    syncOfflineQueue,
     recordAttendance,
     deleteAttendance,
     uploadAttendanceSelfie,
@@ -164,32 +183,51 @@ export const AttendanceView: React.FC = () => {
     ? loggedInLabourer?.labour_id || 101
     : loggedInEmployee?.employee_id || 201;
   const activeSelfPrefix: 'emp' | 'lab' = isLabourerSelfAttendance ? 'lab' : 'emp';
+  const targetRoleBucketName = getAttendanceBucketForRole(
+    currentRole,
+    isLabourerSelfAttendance ? 'LABOUR' : 'OWN'
+  );
 
   const defaultAssignedSiteId = isLabourerSelfAttendance
     ? Number(loggedInLabourer?.assigned_site_id) || sites[0]?.site_id || 1
     : Number(loggedInEmployee?.assigned_site_id) || sites[0]?.site_id || 1;
 
+  // Restore any cached check-in draft from localStorage if the labourer was in a poor reception zone
+  const cachedDraft = loadCheckInDraftFromLocalStorage(activeSelfWorkerId);
+
   // Employee & Labourer Self-Attendance (Selfie + Geofence Verification + Supabase Bucket) State
-  const [selfSiteId, setSelfSiteId] = useState<number>(defaultAssignedSiteId);
+  const [selfSiteId, setSelfSiteId] = useState<number>(
+    cachedDraft?.siteId || defaultAssignedSiteId
+  );
   const targetSelfSite =
     sites.find((s) => s.site_id === selfSiteId) || sites[0] || null;
   const activeGeofenceConfig = resolveSiteGeofenceConfig(targetSelfSite);
 
-  const [empAttDate, setEmpAttDate] = useState<string>('2026-10-22');
-  const [empAttStatus, setEmpAttStatus] = useState<'PRESENT' | 'HALF_DAY'>('PRESENT');
-  const [empAttHours, setEmpAttHours] = useState<number>(8.5);
+  const [empAttDate, setEmpAttDate] = useState<string>(
+    cachedDraft?.attendanceDate || '2026-10-22'
+  );
+  const [empAttStatus, setEmpAttStatus] = useState<'PRESENT' | 'HALF_DAY'>(
+    cachedDraft?.status || 'PRESENT'
+  );
+  const [empAttHours, setEmpAttHours] = useState<number>(cachedDraft?.hoursWorked || 8.5);
   const [selfieFile, setSelfieFile] = useState<File | null>(null);
-  const [selfiePreviewUrl, setSelfiePreviewUrl] = useState<string>('');
-  const [selfieFileName, setSelfieFileName] = useState<string>('');
+  const [selfiePreviewUrl, setSelfiePreviewUrl] = useState<string>(
+    cachedDraft?.selfieDataUrl || ''
+  );
+  const [selfieFileName, setSelfieFileName] = useState<string>(
+    cachedDraft?.selfieFileName || ''
+  );
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
   const [empLocationLat, setEmpLocationLat] = useState<number | null>(
-    activeGeofenceConfig.centerLat
+    cachedDraft?.locationLat ?? activeGeofenceConfig.centerLat
   );
   const [empLocationLng, setEmpLocationLng] = useState<number | null>(
-    activeGeofenceConfig.centerLng
+    cachedDraft?.locationLng ?? activeGeofenceConfig.centerLng
   );
+  const [empAccuracyMeters, setEmpAccuracyMeters] = useState<number | null>(null);
   const [empLocationAddress, setEmpLocationAddress] = useState<string>(
-    `${activeGeofenceConfig.siteName}, ${activeGeofenceConfig.location}`
+    cachedDraft?.locationAddress ||
+      `${activeGeofenceConfig.siteName}, ${activeGeofenceConfig.location}`
   );
   const [isDetectingGps, setIsDetectingGps] = useState<boolean>(false);
   const [isUploadingSelfie, setIsUploadingSelfie] = useState<boolean>(false);
@@ -198,6 +236,20 @@ export const AttendanceView: React.FC = () => {
     null
   );
   const [lastSavedBucketPath, setLastSavedBucketPath] = useState<string | null>(null);
+
+  // Service Worker + localStorage Check-In Queue State for Poor Mobile Reception
+  const [localCheckInQueue, setLocalCheckInQueue] = useState<QueuedLabourCheckIn[]>(() =>
+    loadLocalCheckInQueue()
+  );
+  const [isPoorReceptionMode, setIsPoorReceptionMode] = useState<boolean>(false);
+  const [isFlushingLocalQueue, setIsFlushingLocalQueue] = useState<boolean>(false);
+  const [lastQueuedCheckInNotice, setLastQueuedCheckInNotice] = useState<string | null>(null);
+  const [lastFlushedQueueNotice, setLastFlushedQueueNotice] = useState<string | null>(null);
+  const [draftCachedAt, setDraftCachedAt] = useState<string | null>(
+    cachedDraft?.savedAt || null
+  );
+
+  const isQueueModeActive = !isOnline || isSimulatedOffline || isPoorReceptionMode;
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -209,6 +261,127 @@ export const AttendanceView: React.FC = () => {
     userLng: empLocationLng,
     site: targetSelfSite,
   });
+
+  // Auto-cache check-in form draft in localStorage whenever selfie or coordinates are updated
+  useEffect(() => {
+    if (
+      (currentRole === 'Labourer' || currentRole === 'Employee') &&
+      (selfiePreviewUrl || empLocationLat !== null)
+    ) {
+      const savedAt = new Date().toISOString();
+      saveCheckInDraftToLocalStorage({
+        workerId: activeSelfWorkerId,
+        siteId: selfSiteId,
+        attendanceDate: empAttDate,
+        status: empAttStatus,
+        hoursWorked: empAttHours,
+        selfieDataUrl: selfiePreviewUrl,
+        selfieFileName,
+        locationLat: empLocationLat,
+        locationLng: empLocationLng,
+        locationAddress: empLocationAddress,
+        savedAt,
+      });
+      setDraftCachedAt(savedAt);
+    }
+  }, [
+    currentRole,
+    activeSelfWorkerId,
+    selfSiteId,
+    empAttDate,
+    empAttStatus,
+    empAttHours,
+    selfiePreviewUrl,
+    selfieFileName,
+    empLocationLat,
+    empLocationLng,
+    empLocationAddress,
+  ]);
+
+  // Synchronize queued localStorage check-ins to Supabase when reception is restored
+  const handleSyncQueuedCheckIns = useCallback(async () => {
+    const pendingItems = loadLocalCheckInQueue();
+    if (pendingItems.length === 0) return 0;
+
+    setIsFlushingLocalQueue(true);
+    setEmpValidationError(null);
+    let syncedCount = 0;
+
+    try {
+      for (const item of pendingItems) {
+        const uploadRes = await uploadAttendanceSelfie(
+          item.selfieDataUrl,
+          item.workerId,
+          item.attendanceDate,
+          item.workerPrefix
+        );
+
+        await recordAttendance(
+          {
+            site_id: item.siteId,
+            employee_id: item.workerPrefix === 'emp' ? item.workerId : null,
+            labour_id: item.workerPrefix === 'lab' ? item.workerId : null,
+            attendance_date: item.attendanceDate,
+            status: item.status,
+            hours_worked: item.hoursWorked,
+            overtime_hours: item.overtimeHours,
+            selfie_url: uploadRes.selfieUrl,
+            selfie_bucket_path: uploadRes.bucketPath,
+            location_lat: item.locationLat,
+            location_lng: item.locationLng,
+            location_address: item.locationAddress,
+            geofence_verified: true,
+            geofence_distance_m: item.geofenceDistanceMeters,
+            geofence_radius_m: item.geofenceRadiusMeters,
+          },
+          true
+        );
+
+        const nextQueue = removeLocalCheckIn(item.queueId);
+        setLocalCheckInQueue(nextQueue);
+        setLastSavedBucketPath(uploadRes.bucketPath);
+        syncedCount++;
+      }
+
+      await syncOfflineQueue();
+      requestServiceWorkerSync();
+      clearCheckInDraftFromLocalStorage();
+
+      if (syncedCount > 0) {
+        setIsPoorReceptionMode(false);
+        setOfflineSimulation(false);
+        setLastQueuedCheckInNotice(null);
+        setLastFlushedQueueNotice(
+          `Synced ${syncedCount} queued check-in(s) from offline storage to Attendance Register and cloud storage.`
+        );
+      }
+      return syncedCount;
+    } finally {
+      setIsFlushingLocalQueue(false);
+    }
+  }, [uploadAttendanceSelfie, recordAttendance, syncOfflineQueue, setOfflineSimulation]);
+
+  // Auto-flush localStorage check-in queue when reception is restored
+  useEffect(() => {
+    if (!isQueueModeActive && localCheckInQueue.length > 0 && !isFlushingLocalQueue) {
+      handleSyncQueuedCheckIns();
+    }
+  }, [isQueueModeActive, localCheckInQueue.length, isFlushingLocalQueue, handleSyncQueuedCheckIns]);
+
+  const handleTogglePoorReceptionMode = () => {
+    const nextPoorMode = !isQueueModeActive;
+    setIsPoorReceptionMode(nextPoorMode);
+    setOfflineSimulation(nextPoorMode);
+    setEmpValidationError(null);
+    if (nextPoorMode) {
+      setLastFlushedQueueNotice(null);
+    }
+  };
+
+  const handleRemoveQueuedCheckInItem = (queueId: string) => {
+    const updated = removeLocalCheckIn(queueId);
+    setLocalCheckInQueue(updated);
+  };
 
   const handleSelfSiteChange = (newSiteId: number) => {
     setSelfSiteId(newSiteId);
@@ -276,11 +449,18 @@ export const AttendanceView: React.FC = () => {
           }
         }, 50);
         return;
-      } catch {
-        // Fallback to instant stamped selfie capture if webcam device is unavailable
+      } catch (err: any) {
+        if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
+          setEmpValidationError(
+            'Camera permission denied. Please allow camera access in your browser settings to capture an attendance photograph.'
+          );
+          return;
+        }
       }
     }
-    handleInstantSelfieCapture();
+    setEmpValidationError(
+      'Camera device is unavailable or permission was denied. Please grant camera access or upload a photograph.'
+    );
   };
 
   const handleCaptureFromVideo = () => {
@@ -363,36 +543,121 @@ export const AttendanceView: React.FC = () => {
         (pos) => {
           const rawLat = Number(pos.coords.latitude.toFixed(5));
           const rawLng = Number(pos.coords.longitude.toFixed(5));
+          const accuracy = Math.round(pos.coords.accuracy);
+          setEmpAccuracyMeters(accuracy);
+          setEmpLocationLat(rawLat);
+          setEmpLocationLng(rawLng);
+
           const rawCheck = verifyCoordinatesAgainstSiteGeofence({
             userLat: rawLat,
             userLng: rawLng,
             site: targetSelfSite,
           });
           if (rawCheck.isWithinBoundary) {
-            setEmpLocationLat(rawLat);
-            setEmpLocationLng(rawLng);
             setEmpLocationAddress(
-              `Verified GPS (${rawLat}° N, ${rawLng}° E) · ${activeGeofenceConfig.siteName}`
+              `Verified GPS (${rawLat}° N, ${rawLng}° E, ±${accuracy}m) · ${activeGeofenceConfig.siteName}`
             );
             setGeofenceVerificationNotice(rawCheck.message);
-            setIsDetectingGps(false);
           } else {
-            applySiteVerifiedCoordinates();
+            setEmpLocationAddress(
+              `GPS (${rawLat}° N, ${rawLng}° E, ±${accuracy}m) · Outside Permitted Boundary`
+            );
+            setGeofenceVerificationNotice(
+              `Warning: Current GPS location is outside permitted site area (${rawCheck.distanceMeters}m away; site radius: ${rawCheck.allowedRadiusMeters}m).`
+            );
           }
+          setIsDetectingGps(false);
         },
-        () => {
-          applySiteVerifiedCoordinates();
+        (err) => {
+          console.warn('Geolocation error:', err);
+          setIsDetectingGps(false);
+          setEmpValidationError('Location permission was denied. Please allow GPS access in your browser settings.');
+          setGeofenceVerificationNotice('Location permission denied. GPS coordinates could not be detected.');
         },
-        { timeout: 2500 }
+        { enableHighAccuracy: true, timeout: 8000 }
       );
     } else {
-      applySiteVerifiedCoordinates();
+      setIsDetectingGps(false);
+      setEmpValidationError('Geolocation is not supported by your browser.');
     }
+  };
+
+  const handleQueueCheckInLocally = () => {
+    setEmpValidationError(null);
+    setLastFlushedQueueNotice(null);
+
+    if (!selfiePreviewUrl && !selfieFile) {
+      setEmpValidationError(
+        'Please upload or capture your selfie photo before queueing your check-in.'
+      );
+      return false;
+    }
+
+    if (empLocationLat === null || empLocationLng === null || !empLocationAddress.trim()) {
+      setEmpValidationError(
+        'Please capture or verify your GPS location before queueing your check-in.'
+      );
+      return false;
+    }
+
+    const currentGeoVerification = verifyCoordinatesAgainstSiteGeofence({
+      userLat: empLocationLat,
+      userLng: empLocationLng,
+      site: targetSelfSite,
+    });
+
+    if (!currentGeoVerification.isWithinBoundary) {
+      setGeofenceVerificationNotice(null);
+      setEmpValidationError(currentGeoVerification.message);
+      return false;
+    }
+
+    setIsPoorReceptionMode(true);
+    setOfflineSimulation(true);
+
+    const displayName =
+      currentUser?.full_name ||
+      currentUser?.name ||
+      (isLabourerSelfAttendance ? loggedInLabourer?.name : loggedInEmployee?.name) ||
+      currentRole;
+    const hoursVal = empAttStatus === 'HALF_DAY' ? Math.min(4.5, empAttHours) : empAttHours;
+    const targetBucketPath = `${targetRoleBucketName}/${activeSelfPrefix}_${activeSelfWorkerId}_${empAttDate}.jpg`;
+
+    const queuedItem = enqueueLocalCheckIn({
+      workerId: activeSelfWorkerId,
+      workerName: displayName,
+      workerRole: isLabourerSelfAttendance ? 'Labourer' : 'Employee',
+      workerPrefix: activeSelfPrefix,
+      siteId: selfSiteId,
+      siteName: activeGeofenceConfig.siteName,
+      attendanceDate: empAttDate,
+      status: empAttStatus,
+      hoursWorked: hoursVal,
+      overtimeHours: Math.max(0, hoursVal - 8),
+      selfieDataUrl: selfiePreviewUrl,
+      selfieFileName:
+        selfieFileName || `selfie_${activeSelfPrefix}_${activeSelfWorkerId}_${empAttDate}.jpg`,
+      targetBucketPath,
+      locationLat: empLocationLat,
+      locationLng: empLocationLng,
+      locationAddress: empLocationAddress,
+      geofenceDistanceMeters: currentGeoVerification.distanceMeters,
+      geofenceRadiusMeters: currentGeoVerification.allowedRadiusMeters,
+      receptionState: !isOnline ? 'OFFLINE' : 'POOR_RECEPTION',
+    });
+
+    setLocalCheckInQueue(loadLocalCheckInQueue());
+    setGeofenceVerificationNotice(currentGeoVerification.message);
+    setLastQueuedCheckInNotice(
+      `Check-In Queued Locally (${queuedItem.queueId}): Cached selfie & geofence-verified GPS (${empLocationLat.toFixed(4)}° N, ${empLocationLng.toFixed(4)}° E) in localStorage & Service Worker cache. Will automatically sync to Supabase when mobile reception is restored.`
+    );
+    return true;
   };
 
   const handleEmployeeSelfieAttendanceSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setEmpValidationError(null);
+    setLastFlushedQueueNotice(null);
 
     if (!selfiePreviewUrl && !selfieFile) {
       setEmpValidationError(
@@ -418,6 +683,12 @@ export const AttendanceView: React.FC = () => {
     if (!currentGeoVerification.isWithinBoundary) {
       setGeofenceVerificationNotice(null);
       setEmpValidationError(currentGeoVerification.message);
+      return;
+    }
+
+    // If working in an area with poor mobile reception or offline, queue check-in in localStorage + Service Worker cache
+    if (isQueueModeActive) {
+      handleQueueCheckInLocally();
       return;
     }
 
@@ -450,12 +721,14 @@ export const AttendanceView: React.FC = () => {
           geofence_verified: true,
           geofence_distance_m: currentGeoVerification.distanceMeters,
           geofence_radius_m: currentGeoVerification.allowedRadiusMeters,
+          accuracy_meters: empAccuracyMeters ?? 10,
         },
         true
       );
 
       if (ok) {
         setLastSavedBucketPath(uploadRes.bucketPath);
+        clearCheckInDraftFromLocalStorage();
       }
     } finally {
       setIsUploadingSelfie(false);
@@ -481,7 +754,7 @@ export const AttendanceView: React.FC = () => {
       (sum, a) => sum + Number(a.hours_worked || 0),
       0
     );
-    const previewBucketObject = `attendance-selfies/${activeSelfPrefix}_${activeSelfWorkerId}_${empAttDate}.jpg`;
+    const previewBucketObject = `${targetRoleBucketName}/${activeSelfPrefix}_${activeSelfWorkerId}_${empAttDate}.jpg`;
 
     return (
       <div
@@ -503,13 +776,12 @@ export const AttendanceView: React.FC = () => {
                 My Daily Attendance — {displayName}
               </h1>
               <span className="px-2.5 py-0.5 rounded-md text-[11px] font-mono font-semibold bg-blue-50 text-blue-800 border border-blue-200">
-                Selfie + Geofence GPS · Supabase Bucket
+                Selfie + Geofence GPS · Supabase Bucket: {targetRoleBucketName}
               </span>
             </div>
             <p className="text-xs text-slate-600 mt-1">
-              Validates your live GPS coordinates against the project site&apos;s geofenced boundary before saving your selfie to Supabase Storage bucket{' '}
-              <code className="font-mono text-blue-700 font-semibold">attendance-selfies</code> &amp;{' '}
-              <code className="font-mono text-blue-700 font-semibold">public.attendance</code>
+              Validates your live GPS coordinates against the project site&apos;s geofenced boundary before saving your selfie to cloud storage bucket{' '}
+              <code className="font-mono text-blue-700 font-semibold">{targetRoleBucketName}</code> and recording attendance
             </p>
           </div>
 
@@ -519,6 +791,112 @@ export const AttendanceView: React.FC = () => {
               <strong className="text-amber-700">{myHalfDayCount}d</strong> · Hours:{' '}
               <strong className="text-slate-900">{myTotalHours}h</strong>
             </div>
+          </div>
+        </div>
+
+        {/* Mobile Reception & Service Worker + localStorage Check-In Queue Status Bar */}
+        <div
+          data-testid="reception-status-bar"
+          className={`rounded-xl border p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 ${
+            isQueueModeActive
+              ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+              : 'bg-slate-900 border-slate-800 text-white'
+          }`}
+        >
+          <div className="flex items-start sm:items-center gap-3">
+            <div
+              className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
+                isQueueModeActive
+                  ? 'bg-amber-200/80 text-amber-900 border border-amber-400'
+                  : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+              }`}
+            >
+              {isQueueModeActive ? (
+                <WifiOff className="w-4 h-4" />
+              ) : (
+                <Wifi className="w-4 h-4" />
+              )}
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-display text-xs sm:text-sm font-bold">
+                  {isQueueModeActive
+                    ? 'Poor Mobile Reception Mode Active — Check-In Queueing Enabled'
+                    : 'Mobile Reception Strong — Live Supabase + Service Worker Cache Ready'}
+                </span>
+                <span
+                  data-testid="queued-checkins-count-badge"
+                  className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold border ${
+                    localCheckInQueue.length > 0
+                      ? 'bg-amber-500 text-slate-950 border-amber-600'
+                      : isQueueModeActive
+                      ? 'bg-amber-100 text-amber-900 border-amber-300'
+                      : 'bg-slate-800 text-slate-300 border-slate-700'
+                  }`}
+                >
+                  Queued in localStorage: {localCheckInQueue.length}
+                </span>
+                {draftCachedAt && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-mono text-[10px] bg-blue-500/20 text-blue-200 border border-blue-400/30">
+                    <HardDrive className="w-3 h-3" />
+                    <span>Draft Cached</span>
+                  </span>
+                )}
+              </div>
+              <p
+                className={`text-[11px] mt-0.5 ${
+                  isQueueModeActive ? 'text-amber-800' : 'text-slate-300'
+                }`}
+              >
+                {isQueueModeActive
+                  ? 'Working in a basement, tunnel, or weak-signal site zone: check-in selfies and geofence-verified GPS coordinates are cached in localStorage & Service Worker and auto-sync when reception returns.'
+                  : 'Service Worker (sw.js) & localStorage cache your check-in draft automatically and queue check-ins if mobile signal drops.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              data-testid="toggle-poor-reception-btn"
+              onClick={handleTogglePoorReceptionMode}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
+                isQueueModeActive
+                  ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-700'
+                  : 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-400/40'
+              }`}
+            >
+              {isQueueModeActive ? (
+                <>
+                  <Wifi className="w-3.5 h-3.5" />
+                  <span>Restore Reception &amp; Auto-Sync</span>
+                </>
+              ) : (
+                <>
+                  <WifiOff className="w-3.5 h-3.5" />
+                  <span>Simulate Poor Reception</span>
+                </>
+              )}
+            </button>
+
+            {localCheckInQueue.length > 0 && (
+              <button
+                type="button"
+                data-testid="sync-queued-checkins-btn"
+                onClick={handleSyncQueuedCheckIns}
+                disabled={isFlushingLocalQueue}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold cursor-pointer disabled:opacity-60"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${isFlushingLocalQueue ? 'animate-spin' : ''}`}
+                />
+                <span>
+                  {isFlushingLocalQueue
+                    ? 'Syncing Queue...'
+                    : `Sync Queued Check-Ins (${localCheckInQueue.length})`}
+                </span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -583,6 +961,26 @@ export const AttendanceView: React.FC = () => {
               >
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                 <span>{geofenceVerificationNotice}</span>
+              </div>
+            )}
+
+            {lastQueuedCheckInNotice && (
+              <div
+                data-testid="offline-checkin-queued-banner"
+                className="p-3.5 rounded-lg bg-amber-50 border border-amber-300 text-xs text-amber-950 flex items-start gap-2"
+              >
+                <HardDrive className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <span>{lastQueuedCheckInNotice}</span>
+              </div>
+            )}
+
+            {lastFlushedQueueNotice && (
+              <div
+                data-testid="offline-queue-synced-banner"
+                className="p-3.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-950 flex items-start gap-2"
+              >
+                <CheckCircle2 className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+                <span>{lastFlushedQueueNotice}</span>
               </div>
             )}
 
@@ -915,35 +1313,142 @@ export const AttendanceView: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="pt-2">
+                <div className="pt-2 flex flex-col sm:flex-row gap-2">
                   <button
                     type="submit"
                     data-testid="submit-selfie-attendance-btn"
                     disabled={isUploadingSelfie}
-                    className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-white text-xs font-semibold cursor-pointer shadow-xs disabled:opacity-60 ${
-                      geofenceResult.isWithinBoundary
-                        ? 'bg-[#1D4ED8] hover:bg-blue-800'
-                        : 'bg-red-600 hover:bg-red-700'
+                    className={`flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-white text-xs font-semibold cursor-pointer shadow-xs disabled:opacity-60 ${
+                      !geofenceResult.isWithinBoundary
+                        ? 'bg-red-600 hover:bg-red-700'
+                        : isQueueModeActive
+                        ? 'bg-amber-600 hover:bg-amber-700'
+                        : 'bg-[#1D4ED8] hover:bg-blue-800'
                     }`}
                   >
                     <CloudUpload className="w-4 h-4" />
                     <span>
                       {isUploadingSelfie
                         ? 'Uploading Selfie to Supabase Bucket & Saving...'
-                        : geofenceResult.isWithinBoundary
-                        ? 'Geofence Verified — Mark My Attendance & Save Selfie in Supabase Bucket'
-                        : `Geofence Verification Required (${
+                        : !geofenceResult.isWithinBoundary
+                        ? `Geofence Verification Required (${
                             Number.isFinite(geofenceResult.distanceMeters)
                               ? `${geofenceResult.distanceMeters}m`
                               : 'Invalid'
-                          } > ${geofenceResult.allowedRadiusMeters}m Boundary)`}
+                          } > ${geofenceResult.allowedRadiusMeters}m Boundary)`
+                        : isQueueModeActive
+                        ? 'Poor Reception — Queue Check-In in localStorage & Service Worker'
+                        : 'Geofence Verified — Mark My Attendance & Save Selfie in Supabase Bucket'}
                     </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="queue-checkin-offline-btn"
+                    onClick={handleQueueCheckInLocally}
+                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold cursor-pointer shrink-0"
+                  >
+                    <HardDrive className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Queue Check-In Locally</span>
                   </button>
                 </div>
               </div>
             </div>
           </div>
         </form>
+
+        {/* Queued Check-Ins Cached in localStorage & Service Worker */}
+        {localCheckInQueue.length > 0 && (
+          <div
+            data-testid="offline-checkin-queue-panel"
+            className="bg-amber-50/60 rounded-xl border border-amber-300 overflow-hidden"
+          >
+            <div className="p-4 border-b border-amber-200 bg-amber-100/60 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <HardDrive className="w-4 h-4 text-amber-800" />
+                <div>
+                  <h2 className="font-display text-sm font-bold text-slate-900">
+                    Queued Check-Ins Waiting for Mobile Reception ({localCheckInQueue.length})
+                  </h2>
+                  <p className="text-[11px] text-slate-600">
+                    Cached in <code className="font-mono font-semibold">localStorage</code> &amp;
+                    Service Worker Cache (<code className="font-mono">sw.js</code>) · Auto-syncs to
+                    Supabase when signal returns
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleSyncQueuedCheckIns}
+                disabled={isFlushingLocalQueue}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold cursor-pointer disabled:opacity-60"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${isFlushingLocalQueue ? 'animate-spin' : ''}`}
+                />
+                <span>
+                  {isFlushingLocalQueue ? 'Syncing to Supabase...' : 'Sync All to Supabase Now'}
+                </span>
+              </button>
+            </div>
+
+            <div className="divide-y divide-amber-200/80 text-xs">
+              {localCheckInQueue.map((item) => (
+                <div
+                  key={item.queueId}
+                  data-testid="queued-checkin-row"
+                  className="p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-white/80"
+                >
+                  <div className="flex items-center gap-3">
+                    {item.selfieDataUrl ? (
+                      <img
+                        src={item.selfieDataUrl}
+                        alt="Queued Selfie"
+                        className="w-11 h-11 rounded-lg object-cover border border-amber-400 shrink-0"
+                      />
+                    ) : (
+                      <div className="w-11 h-11 rounded-lg bg-amber-100 border border-amber-300 text-amber-800 flex items-center justify-center shrink-0">
+                        <Camera className="w-4 h-4" />
+                      </div>
+                    )}
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-slate-900">{item.workerName}</span>
+                        <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-mono text-[10px] font-semibold">
+                          QUEUED · {item.status} ({item.hoursWorked}h)
+                        </span>
+                        <span className="font-mono text-[11px] text-slate-500">
+                          {item.attendanceDate}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 mt-0.5">
+                        Site: <strong>{item.siteName}</strong> · Geofence Verified:{' '}
+                        <span className="font-mono text-emerald-700 font-semibold">
+                          {item.geofenceDistanceMeters}m ≤ {item.geofenceRadiusMeters}m
+                        </span>{' '}
+                        · Bucket: <code className="font-mono text-blue-700">{item.targetBucketPath}</code>
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="px-2 py-1 rounded bg-slate-100 text-slate-700 font-mono text-[10px]">
+                      localStorage + SW Cached
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveQueuedCheckInItem(item.queueId)}
+                      className="px-2.5 py-1 rounded border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-[11px] font-semibold cursor-pointer"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* My Logged Attendance History with Selfie & Location */}
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -973,7 +1478,7 @@ export const AttendanceView: React.FC = () => {
                 {myAttendanceRecords.map((rec) => {
                   const bucketPath =
                     rec.selfie_bucket_path ||
-                    `attendance-selfies/${activeSelfPrefix}_${activeSelfWorkerId}_${rec.attendance_date}.jpg`;
+                    `${targetRoleBucketName}/${activeSelfPrefix}_${activeSelfWorkerId}_${rec.attendance_date}.jpg`;
                   const locAddress = rec.location_address || defaultSelfLocationAddress;
                   const lat = rec.location_lat ?? activeGeofenceConfig.centerLat;
                   const lng = rec.location_lng ?? activeGeofenceConfig.centerLng;
@@ -1058,21 +1563,127 @@ export const AttendanceView: React.FC = () => {
     );
   }
 
+  const targetLogSite = sites.find((s) => s.site_id === formSiteId) || sites[0] || null;
+  const logSiteGeo = resolveSiteGeofenceConfig(targetLogSite);
+  const supervisorActiveBucket = getAttendanceBucketForRole(
+    workerCategory === 'labour' ? 'Site Supervisor' : 'Employee',
+    workerCategory === 'labour' ? 'LABOUR' : 'OWN'
+  );
+
+  const activeLogLat = empLocationLat ?? logSiteGeo.centerLat;
+  const activeLogLng = empLocationLng ?? logSiteGeo.centerLng;
+  const logGeofenceCheck = verifyCoordinatesAgainstSiteGeofence({
+    userLat: activeLogLat,
+    userLng: activeLogLng,
+    site: targetLogSite,
+  });
+
+  const handleDetectSupervisorGps = () => {
+    setEmpValidationError(null);
+    setIsDetectingGps(true);
+    if (typeof navigator !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = Number(pos.coords.latitude.toFixed(5));
+          const lng = Number(pos.coords.longitude.toFixed(5));
+          const accuracy = Math.round(pos.coords.accuracy);
+          setEmpLocationLat(lat);
+          setEmpLocationLng(lng);
+          setEmpAccuracyMeters(accuracy);
+          setEmpLocationAddress(`${lat}° N, ${lng}° E (±${accuracy}m) · ${logSiteGeo.siteName}`);
+          setIsDetectingGps(false);
+        },
+        () => {
+          setIsDetectingGps(false);
+          setEmpValidationError(
+            'Location permission denied or GPS unavailable. Please allow location access or sync site coordinates.'
+          );
+        },
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    } else {
+      setIsDetectingGps(false);
+      setEmpValidationError('Geolocation is not supported by your browser.');
+    }
+  };
+
+  const handleSyncSiteCenterGps = () => {
+    setEmpValidationError(null);
+    setEmpLocationLat(logSiteGeo.centerLat);
+    setEmpLocationLng(logSiteGeo.centerLng);
+    setEmpAccuracyMeters(10);
+    setEmpLocationAddress(`${logSiteGeo.siteName}, ${logSiteGeo.location}`);
+  };
+
   const handleLogSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const hoursVal = formStatus === 'ABSENT' || formStatus === 'LEAVE' ? 0 : formHours;
-    await recordAttendance(
-      {
-        site_id: formSiteId,
-        employee_id: workerCategory === 'employee' ? formEmployeeId : null,
-        labour_id: workerCategory === 'labour' ? formLabourId : null,
-        attendance_date: selectedDate,
-        status: formStatus,
-        hours_worked: hoursVal,
-        overtime_hours: Math.max(0, hoursVal - 8),
-      },
-      allowOverwrite
-    );
+    setEmpValidationError(null);
+
+    const requiresPhoto = formStatus === 'PRESENT' || formStatus === 'HALF_DAY';
+    if (requiresPhoto && !selfieFile && !selfiePreviewUrl) {
+      setEmpValidationError(
+        'Photograph is required to submit attendance. Please click a live camera photo or upload an image.'
+      );
+      return;
+    }
+
+    if (!logGeofenceCheck.isWithinBoundary) {
+      setEmpValidationError(logGeofenceCheck.message);
+      return;
+    }
+
+    setIsUploadingSelfie(true);
+    try {
+      const hoursVal = formStatus === 'ABSENT' || formStatus === 'LEAVE' ? 0 : formHours;
+      const targetWorkerId = workerCategory === 'employee' ? formEmployeeId : formLabourId;
+      const prefix: 'emp' | 'lab' = workerCategory === 'employee' ? 'emp' : 'lab';
+      const photoToSave =
+        selfieFile ||
+        selfiePreviewUrl ||
+        generateStampedSelfieDataUrl({
+          employeeName:
+            workerCategory === 'employee'
+              ? employees.find((emp) => emp.employee_id === formEmployeeId)?.name || 'Employee'
+              : labours.find((lab) => lab.labour_id === formLabourId)?.name || 'Labourer',
+          employeeCode: `${prefix.toUpperCase()}${String(targetWorkerId).padStart(3, '0')}`,
+          date: selectedDate,
+          lat: activeLogLat,
+          lng: activeLogLng,
+          address: `${logSiteGeo.siteName}, ${logSiteGeo.location}`,
+        });
+
+      const uploadRes = await uploadAttendanceSelfie(
+        photoToSave,
+        targetWorkerId,
+        selectedDate,
+        prefix
+      );
+
+      await recordAttendance(
+        {
+          site_id: formSiteId,
+          employee_id: workerCategory === 'employee' ? formEmployeeId : null,
+          labour_id: workerCategory === 'labour' ? formLabourId : null,
+          attendance_date: selectedDate,
+          status: formStatus,
+          hours_worked: hoursVal,
+          overtime_hours: Math.max(0, hoursVal - 8),
+          selfie_url: uploadRes.selfieUrl,
+          selfie_bucket_path: uploadRes.bucketPath,
+          location_lat: activeLogLat,
+          location_lng: activeLogLng,
+          location_address: empLocationAddress || `${logSiteGeo.siteName}, ${logSiteGeo.location}`,
+          geofence_verified: true,
+          geofence_distance_m: logGeofenceCheck.distanceMeters,
+          geofence_radius_m: logSiteGeo.radiusMeters,
+          accuracy_meters: empAccuracyMeters ?? 10,
+        },
+        allowOverwrite
+      );
+      setLastSavedBucketPath(uploadRes.bucketPath);
+    } finally {
+      setIsUploadingSelfie(false);
+    }
   };
 
   const filteredRecords = attendance.filter((a) => {
@@ -1138,8 +1749,7 @@ export const AttendanceView: React.FC = () => {
             Daily Site Attendance, Analytics &amp; Shift Hours
           </h1>
           <p className="text-xs text-slate-600 mt-1">
-            Connected to <code className="font-mono text-blue-700">public.attendance</code> ·
-            Supports Salaried Employees &amp; Skilled Labourers with Site Analytics &amp; CSV Export
+            Site attendance tracking, shift hours, overtime logs, and workforce analytics
           </p>
         </div>
 
@@ -1301,6 +1911,19 @@ export const AttendanceView: React.FC = () => {
             </label>
           </div>
 
+          {empValidationError && (
+            <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs font-semibold flex items-center justify-between">
+              <span>{empValidationError}</span>
+              <button
+                type="button"
+                onClick={() => setEmpValidationError(null)}
+                className="text-red-700 hover:underline font-bold ml-3 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-6 gap-3 text-xs">
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Worker Type</label>
@@ -1324,7 +1947,7 @@ export const AttendanceView: React.FC = () => {
                 >
                   {labours.map((l) => (
                     <option key={l.labour_id} value={l.labour_id}>
-                      #{l.labour_id} · {l.name} ({l.skill})
+                      {l.user_id || l.labour_code || `#${l.labour_id}`} · {l.name} ({l.skill})
                     </option>
                   ))}
                 </select>
@@ -1336,7 +1959,7 @@ export const AttendanceView: React.FC = () => {
                 >
                   {employees.map((emp) => (
                     <option key={emp.employee_id} value={emp.employee_id}>
-                      #{emp.employee_id} · {emp.name} ({emp.designation})
+                      {emp.user_id || emp.employee_code || `#${emp.employee_id}`} · {emp.name} ({emp.designation})
                     </option>
                   ))}
                 </select>
@@ -1347,7 +1970,14 @@ export const AttendanceView: React.FC = () => {
               <label className="block font-semibold text-slate-700 mb-1">Construction Site</label>
               <select
                 value={formSiteId}
-                onChange={(e) => setFormSiteId(Number(e.target.value))}
+                onChange={(e) => {
+                  const sid = Number(e.target.value);
+                  setFormSiteId(sid);
+                  const nextSite = sites.find((s) => s.site_id === sid);
+                  const nextGeo = resolveSiteGeofenceConfig(nextSite);
+                  setEmpLocationLat(nextGeo.centerLat);
+                  setEmpLocationLng(nextGeo.centerLng);
+                }}
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white"
               >
                 {sites.map((s) => (
@@ -1390,10 +2020,149 @@ export const AttendanceView: React.FC = () => {
             <div className="flex items-end">
               <button
                 type="submit"
-                className="w-full py-2 px-4 rounded-lg bg-[#1D4ED8] hover:bg-blue-800 text-white font-semibold cursor-pointer"
+                disabled={isUploadingSelfie}
+                className="w-full py-2 px-4 rounded-lg bg-[#1D4ED8] hover:bg-blue-800 disabled:opacity-50 text-white font-semibold cursor-pointer"
               >
-                Save Attendance
+                {isUploadingSelfie ? 'Uploading Photo...' : 'Save Photo & Attendance'}
               </button>
+            </div>
+          </div>
+
+          {isCameraActive && (
+            <div className="p-3 bg-slate-900 rounded-xl text-white space-y-2">
+              <div className="flex items-center justify-between text-xs font-semibold">
+                <span>Live Device Camera — Click Attendance Photo</span>
+                <span className="text-emerald-400 font-mono">Camera Active</span>
+              </div>
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full max-h-56 object-cover rounded-lg bg-black border border-slate-700"
+              />
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={stopCameraStream}
+                  className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCaptureFromVideo}
+                  className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>Snap Photograph</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {selfiePreviewUrl && !isCameraActive && (
+            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <img
+                  src={selfiePreviewUrl}
+                  alt="Attendance preview"
+                  className="w-20 h-14 object-cover rounded border border-slate-300"
+                />
+                <div className="text-xs">
+                  <div className="font-semibold text-slate-900 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Captured Attendance Photograph Ready</span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 font-mono">
+                    GPS: {activeLogLat.toFixed(5)}° N, {activeLogLng.toFixed(5)}° E (±{empAccuracyMeters ?? 10}m)
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelfiePreviewUrl('');
+                  setSelfieFile(null);
+                  handleStartCamera();
+                }}
+                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold text-xs cursor-pointer inline-flex items-center gap-1"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Retake Photo</span>
+              </button>
+            </div>
+          )}
+
+          <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-blue-50 text-blue-800 border border-blue-200 font-mono text-[11px] font-semibold">
+                <CloudUpload className="w-3.5 h-3.5 text-blue-700" />
+                <span>Target Supabase Bucket: {supervisorActiveBucket}</span>
+              </span>
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[11px] border ${
+                  logGeofenceCheck.isWithinBoundary
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                    : 'bg-red-50 text-red-800 border-red-200'
+                }`}
+              >
+                <MapPin className="w-3.5 h-3.5" />
+                <span>
+                  GPS: {activeLogLat.toFixed(4)}° N, {activeLogLng.toFixed(4)}° E (±{empAccuracyMeters ?? 10}m · {logGeofenceCheck.distanceMeters}m ≤ {logSiteGeo.radiusMeters}m)
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={handleDetectSupervisorGps}
+                disabled={isDetectingGps}
+                className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold cursor-pointer inline-flex items-center gap-1"
+              >
+                <Navigation className="w-3 h-3" />
+                <span>{isDetectingGps ? 'Detecting GPS...' : 'Detect Exact GPS'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleSyncSiteCenterGps}
+                className="px-2.5 py-1 rounded bg-white border border-slate-300 text-slate-700 text-[11px] font-semibold cursor-pointer"
+              >
+                Sync Site Coordinates
+              </button>
+              {lastSavedBucketPath && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-50 text-amber-900 border border-amber-200 font-mono text-[11px] font-semibold">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-amber-700" />
+                  <span>Saved: {lastSavedBucketPath}</span>
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleStartCamera}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold cursor-pointer"
+              >
+                <Camera className="w-3.5 h-3.5 text-amber-400" />
+                <span>Take Photo (Camera)</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleInstantSelfieCapture}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 font-semibold cursor-pointer"
+              >
+                <Camera className="w-3.5 h-3.5 text-blue-700" />
+                <span>Click Stamped Photo</span>
+              </button>
+              <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer">
+                <Upload className="w-3.5 h-3.5 text-blue-700" />
+                <span>{selfieFileName ? `Photo: ${selfieFileName}` : 'Upload Photo'}</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleSelfieFileUpload}
+                  className="hidden"
+                />
+              </label>
             </div>
           </div>
         </form>
@@ -1409,6 +2178,7 @@ export const AttendanceView: React.FC = () => {
                 <th className="py-3 px-4">Worker Name</th>
                 <th className="py-3 px-4">Category</th>
                 <th className="py-3 px-4">Construction Site</th>
+                <th className="py-3 px-4">Photo &amp; Exact GPS Coordinates</th>
                 <th className="py-3 px-4">Date</th>
                 <th className="py-3 px-4">Hours Worked</th>
                 <th className="py-3 px-4">Status</th>
@@ -1424,6 +2194,9 @@ export const AttendanceView: React.FC = () => {
                   ? labours.find((l) => l.labour_id === row.labour_id)
                   : null;
                 const site = sites.find((s) => s.site_id === row.site_id);
+                const rowGeo = resolveSiteGeofenceConfig(site);
+                const latVal = row.location_lat ?? rowGeo.centerLat;
+                const lngVal = row.location_lng ?? rowGeo.centerLng;
 
                 return (
                   <tr key={row.attendance_id} className="hover:bg-slate-50/80">
@@ -1436,6 +2209,30 @@ export const AttendanceView: React.FC = () => {
                     </td>
                     <td className="py-3 px-4 text-slate-700">
                       {site?.site_name || `Site #${row.site_id}`}
+                    </td>
+                    <td className="py-3 px-4">
+                      <div className="flex items-center gap-2.5">
+                        {row.selfie_url ? (
+                          <img
+                            src={row.selfie_url}
+                            alt="Attendance photo"
+                            className="w-10 h-10 rounded object-cover border border-slate-300 shrink-0"
+                          />
+                        ) : (
+                          <div className="w-10 h-10 rounded bg-blue-50 border border-blue-200 text-blue-700 flex items-center justify-center shrink-0">
+                            <Camera className="w-4 h-4" />
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <div className="font-mono text-[11px] text-slate-800 font-semibold">
+                            {latVal.toFixed(4)}° N, {lngVal.toFixed(4)}° E{' '}
+                            {row.accuracy_meters ? `(±${row.accuracy_meters}m)` : ''}
+                          </div>
+                          <div className="text-[10px] text-emerald-700 font-mono truncate max-w-[220px]">
+                            {row.selfie_bucket_path || 'Verified in Supabase Bucket'}
+                          </div>
+                        </div>
+                      </div>
                     </td>
                     <td className="py-3 px-4 font-mono text-slate-600">{row.attendance_date}</td>
                     <td className="py-3 px-4 font-mono font-semibold text-slate-900">

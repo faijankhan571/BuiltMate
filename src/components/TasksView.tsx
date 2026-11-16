@@ -146,8 +146,7 @@ export const TasksView: React.FC = () => {
               </>
             ) : (
               <>
-                Connected to <code className="font-mono text-blue-700">public.tasks</code> · Manage
-                Employee Office Tasks (assigned by HR / Admin) and Site Construction Tasks
+                Task management for employee office workflows (assigned by HR / Admin) and site construction tasks
               </>
             )}
           </p>
@@ -430,7 +429,7 @@ export const TasksView: React.FC = () => {
                       >
                         {employees.map((emp) => (
                           <option key={emp.employee_id} value={emp.employee_id}>
-                            {emp.name} ({emp.designation} · {emp.department || 'Office'})
+                            {emp.user_id || emp.employee_code} · {emp.name} ({emp.designation})
                           </option>
                         ))}
                       </select>
@@ -481,7 +480,7 @@ export const TasksView: React.FC = () => {
                       >
                         {siteSupervisors.map((s) => (
                           <option key={s.supervisor_id} value={s.supervisor_id}>
-                            {s.name}
+                            {s.user_id || s.employee_code} · {s.name}
                           </option>
                         ))}
                       </select>
@@ -499,7 +498,7 @@ export const TasksView: React.FC = () => {
                       >
                         {labours.map((l) => (
                           <option key={l.labour_id} value={l.labour_id}>
-                            {l.name} ({l.skill})
+                            {l.user_id || l.labour_code} · {l.name} ({l.skill_or_trade || l.skill})
                           </option>
                         ))}
                       </select>

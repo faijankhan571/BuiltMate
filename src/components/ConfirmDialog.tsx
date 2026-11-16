@@ -2,9 +2,11 @@ import React from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 
 interface ConfirmDialogProps {
-  open: boolean;
+  open?: boolean;
+  isOpen?: boolean;
   title: string;
-  description: string;
+  description?: string;
+  message?: string;
   confirmLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
@@ -12,13 +14,17 @@ interface ConfirmDialogProps {
 
 export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   open,
+  isOpen,
   title,
   description,
+  message,
   confirmLabel = 'Confirm Delete',
   onConfirm,
   onCancel,
 }) => {
-  if (!open) return null;
+  const isDialogOpen = open ?? isOpen ?? false;
+  const bodyText = description ?? message ?? '';
+  if (!isDialogOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
@@ -43,7 +49,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         </div>
 
         <div className="p-5 space-y-4 text-xs">
-          <p className="text-slate-600 leading-relaxed">{description}</p>
+          <p className="text-slate-600 leading-relaxed">{bodyText}</p>
           <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
             <button
               type="button"

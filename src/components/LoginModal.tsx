@@ -21,8 +21,10 @@ import {
   Users,
   ShieldAlert,
   Database,
+  Globe,
 } from 'lucide-react';
 import { useWorkforce } from '../context/WorkforceContext';
+import { useLanguage } from '../context/LanguageContext';
 import { RoleTableName, UserRole } from '../types';
 import { checkActiveIdentifierInSixRoleTables } from '../utils/workforceLogic';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -59,8 +61,8 @@ const ROLE_OPTIONS: RoleOption[] = [
     shortTabLabel: 'HR Manager',
     description:
       'Manage employee and labourer information, attendance, leave, KYC requests, and workforce assignments.',
-    placeholderEmail: 'priya.nair@buildmate.ac.in',
-    placeholderUserId: 'HR001',
+    placeholderEmail: 'manasi.pawar@buildmate.ac.in',
+    placeholderUserId: 'HRM001',
     badgeColor: 'bg-emerald-50 text-emerald-800 border-emerald-200',
     icon: <Users className="w-4 h-4" />,
   },
@@ -71,7 +73,7 @@ const ROLE_OPTIONS: RoleOption[] = [
     shortTabLabel: 'Site Supervisor',
     description:
       'Access assigned sites, assigned workers, daily attendance, task updates, material requests, and site progress.',
-    placeholderEmail: 'vikram.rathore@buildmate.ac.in',
+    placeholderEmail: 'sachin.patil@buildmate.ac.in',
     placeholderUserId: 'SUP001',
     badgeColor: 'bg-amber-50 text-amber-800 border-amber-200',
     icon: <ClipboardCheck className="w-4 h-4" />,
@@ -95,7 +97,7 @@ const ROLE_OPTIONS: RoleOption[] = [
     shortTabLabel: 'Employee',
     description:
       'View their own profile, attendance, leave requests, assigned tasks, and authorized salary information.',
-    placeholderEmail: 'karthik.subramanian@buildmate.ac.in',
+    placeholderEmail: 'rohit.sharma@buildmate.ac.in',
     placeholderUserId: 'EMP001',
     badgeColor: 'bg-indigo-50 text-indigo-800 border-indigo-200',
     icon: <Briefcase className="w-4 h-4" />,
@@ -107,7 +109,7 @@ const ROLE_OPTIONS: RoleOption[] = [
     shortTabLabel: 'Labourer',
     description:
       'View their own labour profile, skills, wage rate, attendance, assigned site, tasks, and authorized wage/payment information.',
-    placeholderEmail: 'rameshwar.yadav@buildmate.ac.in',
+    placeholderEmail: 'ramesh.patil@buildmate.ac.in',
     placeholderUserId: 'LAB001',
     badgeColor: 'bg-slate-100 text-slate-800 border-slate-300',
     icon: <Wrench className="w-4 h-4" />,
@@ -123,6 +125,7 @@ export const LoginModal: React.FC = () => {
     isDarkMode,
     toggleDarkMode,
   } = useWorkforce();
+  const { currentLanguage, languages, setLanguage, t } = useLanguage();
 
   const [selectedRole, setSelectedRole] = useState<UserRole>('Admin');
   const [email, setEmail] = useState<string>('');
@@ -296,7 +299,30 @@ export const LoginModal: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-3 text-xs text-slate-600">
+        <div className="flex flex-wrap items-center gap-2.5 text-xs text-slate-600">
+          <div
+            data-no-translate="true"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white border border-slate-200"
+          >
+            <Globe className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+            <select
+              data-testid="login-india-language-select"
+              aria-label="Select Indian Language (Python NLP)"
+              value={currentLanguage}
+              onChange={(e) => setLanguage(e.target.value)}
+              className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer"
+            >
+              {languages.map((lang) => (
+                <option key={lang.code} value={lang.code}>
+                  {currentLanguage === 'en'
+                    ? lang.code === 'en'
+                      ? 'English'
+                      : `${lang.name} (${lang.nativeName})`
+                    : lang.nativeName}
+                </option>
+              ))}
+            </select>
+          </div>
           <PWAInstallButton />
           <button
             type="button"
@@ -351,6 +377,7 @@ export const LoginModal: React.FC = () => {
                     key={option.role}
                     type="button"
                     role="tab"
+                    data-testid={`login-role-tab-${option.roleTable}`}
                     aria-selected={isSelected}
                     onClick={() => handleSelectRole(option)}
                     className={`text-left p-3 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
@@ -502,7 +529,7 @@ export const LoginModal: React.FC = () => {
                   <>
                     <div className="mb-5">
                       <h2 className="font-display text-xl font-bold text-[#0F172A]">
-                        Sign in to BuildMate
+                        {t('welcome', 'Sign in to BuildMate')}
                       </h2>
                       <p className="text-xs text-slate-600 mt-1">
                         Enter your registered work email or User ID and password to access your

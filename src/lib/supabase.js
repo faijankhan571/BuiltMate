@@ -1,10 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
 
-const rawUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim();
+const rawUrl = (
+  import.meta.env.VITE_SUPABASE_URL || 'https://uznmqmvafuyyzgshsogx.supabase.co'
+).trim();
 const rawKey = (
   import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
   import.meta.env.VITE_SUPABASE_ANON_KEY ||
-  ''
+  'sb_publishable__A2zXL397Egt6QGqJB1NfQ_GdSEkigH'
 ).trim();
 
 // Repair 1-char truncation if VITE_SUPABASE_PUBLISHABLE_KEY was pasted missing trailing 'H'
@@ -23,9 +25,22 @@ export const isSupabaseConfigured = Boolean(
     supabaseUrl.startsWith('http')
 );
 
+async function blobToBase64(blob) {
+  const buf = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 async function customSupabaseFetch(input, init) {
   const url = typeof input === 'string' ? input : input?.url || String(input);
-  if (typeof window !== 'undefined' && url.includes('/rest/v1/')) {
+  if (
+    typeof window !== 'undefined' &&
+    (url.includes('/rest/v1/') || url.includes('/storage/v1/'))
+  ) {
     try {
       const headersObj = {};
       if (init?.headers) {
@@ -39,6 +54,11 @@ async function customSupabaseFetch(input, init) {
           Object.assign(headersObj, init.headers);
         }
       }
+      let bodyStr = typeof init?.body === 'string' ? init.body : undefined;
+      let bodyBase64 = undefined;
+      if (!bodyStr && init?.body && typeof init.body.arrayBuffer === 'function') {
+        bodyBase64 = await blobToBase64(init.body);
+      }
       const proxyRes = await window.fetch('/api/supabase-proxy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -46,7 +66,8 @@ async function customSupabaseFetch(input, init) {
           url,
           method: init?.method || 'GET',
           headers: headersObj,
-          body: typeof init?.body === 'string' ? init.body : undefined,
+          body: bodyStr,
+          bodyBase64,
         }),
       });
       if (proxyRes.ok) {

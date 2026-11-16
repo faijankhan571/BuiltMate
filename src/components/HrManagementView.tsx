@@ -1,7 +1,12 @@
 import React, { useState } from 'react';
-import { UserCog, Plus, CheckCircle2, XCircle, Wallet, Users, Clock } from 'lucide-react';
+import { UserCog, Plus, CheckCircle2, XCircle, Wallet, Users, Clock, AlertCircle } from 'lucide-react';
 import { useWorkforce } from '../context/WorkforceContext';
-import { ModuleId } from '../utils/workforceLogic';
+import {
+  ModuleId,
+  validateWorkEmail,
+  validate10DigitPhone,
+  sanitize10DigitPhone,
+} from '../utils/workforceLogic';
 
 interface HrManagementViewProps {
   onNavigate: (module: ModuleId) => void;
@@ -25,19 +30,49 @@ export const HrManagementView: React.FC<HrManagementViewProps> = ({ onNavigate }
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [phoneError, setPhoneError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleAddHr = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !email.trim()) return;
-    await addHrManager({
-      user_id: null,
-      name: name.trim(),
-      email: email.trim(),
-      phone: phone.trim() || '+91 98200 00000',
-    });
-    setName('');
-    setEmail('');
-    setPhone('');
+    setEmailError(null);
+    setPhoneError(null);
+
+    const trimmedName = name.trim();
+    const trimmedEmail = email.trim().toLowerCase();
+    const cleanPhone = sanitize10DigitPhone(phone);
+
+    if (!trimmedName) return;
+
+    const emailValidation = validateWorkEmail(trimmedEmail);
+    if (!emailValidation.valid) {
+      setEmailError(emailValidation.error || 'Work email must end with @buildmate.ac.in');
+      return;
+    }
+
+    const phoneValidation = validate10DigitPhone(cleanPhone);
+    if (!phoneValidation.valid) {
+      setPhoneError(phoneValidation.error || 'Phone number must have exactly 10 numeric digits');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await addHrManager({
+        user_id: null,
+        name: trimmedName,
+        email: trimmedEmail,
+        work_email: trimmedEmail,
+        phone: cleanPhone,
+        department: 'Human Resources',
+      });
+      setName('');
+      setEmail('');
+      setPhone('');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const pendingLeaves = leaves.filter((l) => l.status === 'PENDING');
@@ -51,8 +86,7 @@ export const HrManagementView: React.FC<HrManagementViewProps> = ({ onNavigate }
             HR Management &amp; Workforce Governance
           </h1>
           <p className="text-xs text-slate-600 mt-1">
-            Connected to <code className="font-mono text-blue-700">public.hr_managers</code>,
-            employee administration, salary disbursements, and leave approvals
+            Workforce administration, employee rosters, salary disbursements, and leave approvals
           </p>
         </div>
 
@@ -79,7 +113,7 @@ export const HrManagementView: React.FC<HrManagementViewProps> = ({ onNavigate }
         <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 p-5">
           <h2 className="font-display text-base font-bold text-slate-900 flex items-center gap-2">
             <UserCog className="w-4 h-4 text-blue-700" />
-            <span>Registered HR Managers (public.hr_managers)</span>
+            <span>Registered HR Managers</span>
           </h2>
           <div className="mt-4 overflow-x-auto">
             <table className="w-full text-left border-collapse text-xs">
@@ -96,9 +130,9 @@ export const HrManagementView: React.FC<HrManagementViewProps> = ({ onNavigate }
                 {hrManagers.map((hr) => {
                   const count = salaries.filter((s) => s.hr_id === hr.hr_id).length;
                   return (
-                    <tr key={hr.hr_id}>
-                      <td className="py-2.5 px-3 font-mono font-semibold text-slate-600">
-                        #{hr.hr_id}
+                    <tr key={`${hr.hr_id}-${hr.user_id || hr.email}`}>
+                      <td className="py-2.5 px-3 font-mono font-semibold text-blue-700">
+                        {hr.user_id || `#${hr.hr_id}`}
                       </td>
                       <td className="py-2.5 px-3 font-semibold text-slate-900">{hr.name}</td>
                       <td className="py-2.5 px-3 text-slate-600">{hr.email}</td>
@@ -121,7 +155,7 @@ export const HrManagementView: React.FC<HrManagementViewProps> = ({ onNavigate }
               Add HR Officer
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Insert new record into <code className="font-mono">public.hr_managers</code>
+              Register new HR officer in the workforce directory
             </p>
             <form onSubmit={handleAddHr} className="space-y-3 mt-4 text-xs">
               <div>
@@ -129,39 +163,78 @@ export const HrManagementView: React.FC<HrManagementViewProps> = ({ onNavigate }
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Meera Krishnan"
+                  placeholder="e.g. Prasad Gaikwad"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:border-blue-600"
                 />
               </div>
+
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Official Email *</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block font-semibold text-slate-700">Official Email *</label>
+                  <span className="text-[10px] text-blue-700 font-mono font-semibold">@buildmate.ac.in required</span>
+                </div>
                 <input
                   type="email"
                   required
-                  placeholder="meera.hr@buildforce.in"
+                  pattern=".+@buildmate\.ac\.in"
+                  title="Email must end with @buildmate.ac.in"
+                  placeholder="e.g. prasad.gaikwad@buildmate.ac.in"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300"
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    if (emailError) setEmailError(null);
+                  }}
+                  className={`w-full px-3 py-2 rounded-lg border focus:outline-none ${
+                    emailError ? 'border-red-400 bg-red-50/30' : 'border-slate-300 focus:border-blue-600'
+                  }`}
                 />
+                {emailError && (
+                  <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3 shrink-0" />
+                    <span>{emailError}</span>
+                  </p>
+                )}
               </div>
+
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Phone</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block font-semibold text-slate-700">Phone Number *</label>
+                  <span className="text-[10px] text-slate-500 font-mono">10 digits only</span>
+                </div>
                 <input
-                  type="text"
-                  placeholder="+91 98201 55110"
+                  type="tel"
+                  required
+                  maxLength={10}
+                  pattern="[0-9]{10}"
+                  title="Phone number must have exactly 10 digits"
+                  placeholder="e.g. 8555555555"
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300"
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/\D/g, '').slice(0, 10);
+                    setPhone(digits);
+                    if (phoneError) setPhoneError(null);
+                  }}
+                  className={`w-full px-3 py-2 rounded-lg border font-mono focus:outline-none ${
+                    phoneError ? 'border-red-400 bg-red-50/30' : 'border-slate-300 focus:border-blue-600'
+                  }`}
                 />
+                {phoneError && (
+                  <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3 shrink-0" />
+                    <span>{phoneError}</span>
+                  </p>
+                )}
               </div>
+
               <button
                 type="submit"
-                className="w-full py-2 px-4 rounded-lg bg-[#1D4ED8] hover:bg-blue-800 text-white font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
+                disabled={isSubmitting}
+                className="w-full py-2 px-4 rounded-lg bg-[#1D4ED8] hover:bg-blue-800 disabled:opacity-50 text-white font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
-                <span>Add HR Manager</span>
+                <span>{isSubmitting ? 'Registering...' : 'Add HR Manager'}</span>
               </button>
             </form>
           </div>

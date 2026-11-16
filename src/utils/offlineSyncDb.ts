@@ -290,3 +290,197 @@ export async function requestServiceWorkerSync(): Promise<void> {
     // Fallback handled by window online listener
   }
 }
+
+export const LOCAL_CHECKIN_QUEUE_KEY = 'bm_v4_labour_checkin_queue';
+export const LOCAL_CHECKIN_DRAFT_KEY = 'bm_v4_labour_checkin_draft';
+
+export interface QueuedLabourCheckIn {
+  queueId: string;
+  workerId: number;
+  workerName: string;
+  workerRole: 'Labourer' | 'Employee';
+  workerPrefix: 'lab' | 'emp';
+  siteId: number;
+  siteName: string;
+  attendanceDate: string;
+  status: 'PRESENT' | 'HALF_DAY';
+  hoursWorked: number;
+  overtimeHours: number;
+  selfieDataUrl: string;
+  selfieFileName: string;
+  targetBucketPath: string;
+  locationLat: number;
+  locationLng: number;
+  locationAddress: string;
+  geofenceDistanceMeters: number;
+  geofenceRadiusMeters: number;
+  queuedAt: string;
+  receptionState: 'OFFLINE' | 'POOR_RECEPTION';
+  syncStatus: 'QUEUED_LOCAL' | 'SYNCING' | 'SYNCED';
+}
+
+export interface CheckInDraftCache {
+  workerId: number;
+  siteId: number;
+  attendanceDate: string;
+  status: 'PRESENT' | 'HALF_DAY';
+  hoursWorked: number;
+  selfieDataUrl: string;
+  selfieFileName: string;
+  locationLat: number | null;
+  locationLng: number | null;
+  locationAddress: string;
+  savedAt: string;
+}
+
+// In-memory fallback for Node.js unit tests where window.localStorage is absent
+let memoryLocalCheckInQueue: QueuedLabourCheckIn[] = [];
+let memoryCheckInDraft: CheckInDraftCache | null = null;
+
+function hasLocalStorage(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage !== null;
+  } catch {
+    return false;
+  }
+}
+
+function notifyServiceWorkerOfCheckInQueue(queue: QueuedLabourCheckIn[]): void {
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+    return;
+  }
+  try {
+    if (navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'CACHE_OFFLINE_CHECKIN_QUEUE',
+        queue,
+        timestamp: Date.now(),
+      });
+    }
+  } catch {
+    // Ignore if SW controller not yet claimed
+  }
+}
+
+export function loadLocalCheckInQueue(): QueuedLabourCheckIn[] {
+  if (!hasLocalStorage()) {
+    return [...memoryLocalCheckInQueue];
+  }
+  try {
+    const raw = localStorage.getItem(LOCAL_CHECKIN_QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [...memoryLocalCheckInQueue];
+  }
+}
+
+export function saveLocalCheckInQueue(queue: QueuedLabourCheckIn[]): void {
+  memoryLocalCheckInQueue = [...queue];
+  if (hasLocalStorage()) {
+    try {
+      localStorage.setItem(LOCAL_CHECKIN_QUEUE_KEY, JSON.stringify(queue));
+    } catch {
+      // Fallback to in-memory if storage quota exceeded
+    }
+  }
+  notifyServiceWorkerOfCheckInQueue(queue);
+}
+
+export function enqueueLocalCheckIn(
+  input: Omit<QueuedLabourCheckIn, 'queueId' | 'queuedAt' | 'syncStatus'> & {
+    queueId?: string;
+    queuedAt?: string;
+  }
+): QueuedLabourCheckIn {
+  const currentQueue = loadLocalCheckInQueue();
+  const newItem: QueuedLabourCheckIn = {
+    ...input,
+    queueId:
+      input.queueId ||
+      `chk-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    queuedAt: input.queuedAt || new Date().toISOString(),
+    syncStatus: 'QUEUED_LOCAL',
+  };
+
+  // Replace existing queued check-in for the same worker + date + site if present, or append
+  const existingIdx = currentQueue.findIndex(
+    (item) =>
+      item.workerId === newItem.workerId &&
+      item.workerPrefix === newItem.workerPrefix &&
+      item.siteId === newItem.siteId &&
+      item.attendanceDate === newItem.attendanceDate
+  );
+
+  const nextQueue =
+    existingIdx >= 0
+      ? currentQueue.map((item, idx) => (idx === existingIdx ? newItem : item))
+      : [newItem, ...currentQueue];
+
+  saveLocalCheckInQueue(nextQueue);
+  return newItem;
+}
+
+export function removeLocalCheckIn(queueId: string): QueuedLabourCheckIn[] {
+  const currentQueue = loadLocalCheckInQueue();
+  const nextQueue = currentQueue.filter((item) => item.queueId !== queueId);
+  saveLocalCheckInQueue(nextQueue);
+  return nextQueue;
+}
+
+export function clearLocalCheckInQueue(): void {
+  memoryLocalCheckInQueue = [];
+  if (hasLocalStorage()) {
+    try {
+      localStorage.removeItem(LOCAL_CHECKIN_QUEUE_KEY);
+    } catch {
+      // ignore
+    }
+  }
+  notifyServiceWorkerOfCheckInQueue([]);
+}
+
+export function saveCheckInDraftToLocalStorage(draft: CheckInDraftCache): void {
+  memoryCheckInDraft = { ...draft };
+  if (hasLocalStorage()) {
+    try {
+      localStorage.setItem(LOCAL_CHECKIN_DRAFT_KEY, JSON.stringify(draft));
+    } catch {
+      // ignore quota error
+    }
+  }
+}
+
+export function loadCheckInDraftFromLocalStorage(
+  workerId?: number
+): CheckInDraftCache | null {
+  let draft: CheckInDraftCache | null = null;
+  if (hasLocalStorage()) {
+    try {
+      const raw = localStorage.getItem(LOCAL_CHECKIN_DRAFT_KEY);
+      draft = raw ? (JSON.parse(raw) as CheckInDraftCache) : null;
+    } catch {
+      draft = memoryCheckInDraft;
+    }
+  } else {
+    draft = memoryCheckInDraft;
+  }
+
+  if (draft && workerId !== undefined && draft.workerId !== workerId) {
+    return null;
+  }
+  return draft;
+}
+
+export function clearCheckInDraftFromLocalStorage(): void {
+  memoryCheckInDraft = null;
+  if (hasLocalStorage()) {
+    try {
+      localStorage.removeItem(LOCAL_CHECKIN_DRAFT_KEY);
+    } catch {
+      // ignore
+    }
+  }
+}
+

@@ -19,6 +19,8 @@ import { LabourRecord, WageType, KycStatus, HealthStatus } from '../types';
 import {
   calculateWorkerAttendanceMetrics,
   getRolePermissions,
+  validate10DigitPhone,
+  sanitize10DigitPhone,
 } from '../utils/workforceLogic';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -66,6 +68,7 @@ export const LaboursView: React.FC = () => {
     health_checkup_date: '2026-10-01',
     medical_notes: '',
   });
+  const [phoneError, setPhoneError] = useState<string | null>(null);
 
   const [assignModalLab, setAssignModalLab] = useState<LabourRecord | null>(null);
   const [assignProjectId, setAssignProjectId] = useState<number>(projects[0]?.project_id || 1);
@@ -77,10 +80,14 @@ export const LaboursView: React.FC = () => {
   const uniqueSkills = Array.from(new Set(labours.map((l) => l.skill)));
 
   const filteredLabours = labours.filter((l) => {
+    const q = search.toLowerCase();
     const matchesSearch =
-      l.name.toLowerCase().includes(search.toLowerCase()) ||
-      l.skill.toLowerCase().includes(search.toLowerCase()) ||
-      l.phone.includes(search);
+      l.name.toLowerCase().includes(q) ||
+      l.skill.toLowerCase().includes(q) ||
+      l.phone.includes(search) ||
+      (l.user_id || '').toLowerCase().includes(q) ||
+      (l.labour_code || '').toLowerCase().includes(q) ||
+      (l.work_email || '').toLowerCase().includes(q);
     const matchesSkill = skillFilter === 'ALL' || l.skill === skillFilter;
     const matchesWageType =
       wageTypeFilter === 'ALL' || (l.wage_type || 'DAILY') === wageTypeFilter;
@@ -108,6 +115,7 @@ export const LaboursView: React.FC = () => {
       health_checkup_date: new Date().toISOString().slice(0, 10),
       medical_notes: 'Site safety induction & basic health screening completed.',
     });
+    setPhoneError(null);
     setModalOpen(true);
   };
 
@@ -115,8 +123,8 @@ export const LaboursView: React.FC = () => {
     setEditingLabour(lab);
     setFormData({
       name: lab.name,
-      phone: lab.phone,
-      emergency_contact: lab.emergency_contact || '+91 98201 00000',
+      phone: sanitize10DigitPhone(lab.phone),
+      emergency_contact: sanitize10DigitPhone(lab.emergency_contact || '9820100000'),
       address: lab.address,
       skill: lab.skill,
       experience_years: lab.experience_years || 5,
@@ -132,16 +140,37 @@ export const LaboursView: React.FC = () => {
       health_checkup_date: lab.health_checkup_date || '2026-10-01',
       medical_notes: lab.medical_notes || '',
     });
+    setPhoneError(null);
     setModalOpen(true);
   };
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.name.trim()) return;
+    setPhoneError(null);
+
+    const trimmedName = formData.name.trim();
+    const cleanPhone = sanitize10DigitPhone(formData.phone);
+    const cleanEmergency = sanitize10DigitPhone(formData.emergency_contact);
+
+    if (!trimmedName) return;
+
+    const phoneValidation = validate10DigitPhone(cleanPhone);
+    if (!phoneValidation.valid) {
+      setPhoneError(phoneValidation.error || 'Phone number must have exactly 10 digits');
+      return;
+    }
+
+    const payload = {
+      ...formData,
+      name: trimmedName,
+      phone: cleanPhone,
+      emergency_contact: cleanEmergency,
+    };
+
     if (editingLabour) {
-      await updateLabour(editingLabour.labour_id, formData);
+      await updateLabour(editingLabour.labour_id, payload);
     } else {
-      await addLabour({ ...formData, user_id: null });
+      await addLabour({ ...payload, user_id: null });
     }
     setModalOpen(false);
   };
@@ -188,9 +217,7 @@ export const LaboursView: React.FC = () => {
             Construction Labour Management
           </h1>
           <p className="text-xs text-slate-600 mt-1">
-            Connected to <code className="font-mono text-blue-700">public.labours</code> &amp;{' '}
-            <code className="font-mono text-blue-700">public.labour_project_assignments</code> ·
-            Supports Daily (₹/Day), Hourly (₹/Hour) &amp; Contract Wages, KYC, Health &amp; Portal Auth
+            Skilled construction labour directory · Supports daily (₹/Day), hourly (₹/Hour) &amp; contract wages, KYC verification, health &amp; portal access
           </p>
         </div>
 
@@ -291,12 +318,13 @@ export const LaboursView: React.FC = () => {
 
                 return (
                   <tr key={lab.labour_id} className="hover:bg-slate-50/80">
-                    <td className="py-3 px-4 font-mono font-semibold text-slate-600">
-                      #{lab.labour_id}
+                    <td className="py-3 px-4 font-mono font-semibold text-blue-700">
+                      {lab.user_id || lab.labour_code || `#${lab.labour_id}`}
                     </td>
                     <td className="py-3 px-4">
                       <div className="font-semibold text-slate-900">{lab.name}</div>
                       <div className="text-slate-500 text-[11px]">
+                        {lab.work_email ? `${lab.work_email} · ` : ''}
                         {lab.phone} · {lab.experience_years || 5} yrs exp
                       </div>
                       <span
@@ -480,14 +508,30 @@ export const LaboursView: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Phone *</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block font-semibold text-slate-700">Phone Number *</label>
+                    <span className="text-[10px] text-slate-500 font-mono">10 digits only</span>
+                  </div>
                   <input
-                    type="text"
+                    type="tel"
                     required
+                    maxLength={10}
+                    pattern="[0-9]{10}"
+                    title="Phone number must have exactly 10 digits"
+                    placeholder="e.g. 9000000101"
                     value={formData.phone}
-                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-300"
+                    onChange={(e) => {
+                      const digits = e.target.value.replace(/\D/g, '').slice(0, 10);
+                      setFormData({ ...formData, phone: digits });
+                      if (phoneError) setPhoneError(null);
+                    }}
+                    className={`w-full px-3 py-2 rounded-lg border font-mono focus:outline-none ${
+                      phoneError ? 'border-red-400 bg-red-50/30' : 'border-slate-300 focus:border-blue-600'
+                    }`}
                   />
+                  {phoneError && (
+                    <p className="text-[11px] text-red-600 mt-1">{phoneError}</p>
+                  )}
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Trade Skill *</label>
@@ -698,7 +742,7 @@ export const LaboursView: React.FC = () => {
             <div className="flex items-center justify-between pb-3 border-b border-slate-200">
               <div>
                 <h3 className="font-display text-base font-bold text-slate-900">
-                  {profileLab.name} (#{profileLab.labour_id})
+                  {profileLab.name} ({profileLab.user_id || profileLab.labour_code || `#${profileLab.labour_id}`})
                 </h3>
                 <p className="text-slate-500">
                   Trade: {profileLab.skill} · Wage Basis: {profileLab.wage_type || 'DAILY'} (₹
@@ -875,7 +919,7 @@ export const LaboursView: React.FC = () => {
       <ConfirmDialog
         isOpen={Boolean(deleteTarget)}
         title="Delete Labourer Record"
-        message={`Are you sure you want to delete ${deleteTarget?.name} (#${deleteTarget?.labour_id}) from public.labours?`}
+        message={`Are you sure you want to delete ${deleteTarget?.name} (${deleteTarget?.user_id || `#${deleteTarget?.labour_id}`}) from the labour directory?`}
         confirmLabel="Delete Labourer"
         onConfirm={() => {
           if (deleteTarget) deleteLabour(deleteTarget.labour_id);

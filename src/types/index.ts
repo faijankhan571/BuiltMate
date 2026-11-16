@@ -107,16 +107,20 @@ export interface LabourRecord {
   user_id?: string | null;
   name: string;
   full_name?: string;
+  email?: string;
   work_email?: string;
   phone: string;
   emergency_contact?: string;
   address: string;
   skill: string;
+  skill_or_trade?: string;
   labour_code?: string;
+  site_id?: number | null;
   assigned_site_id?: string | number | null;
   experience_years?: number;
   wage_type?: WageType;
   wage_rate: number;
+  daily_rate?: number;
   hourly_rate?: number;
   auth_enabled?: boolean;
   kyc_status?: KycStatus;
@@ -236,6 +240,7 @@ export interface AttendanceRecord {
   geofence_verified?: boolean;
   geofence_distance_m?: number;
   geofence_radius_m?: number;
+  accuracy_meters?: number | null;
   updated_at?: string;
 }
 
@@ -260,9 +265,15 @@ export interface TaskRecord {
 
 export interface LeaveRecord {
   leave_id: number;
-  labour_id: number;
+  labour_id: string | number;
+  user_id?: string | null;
   employee_id?: number | null;
-  worker_type?: 'LABOUR' | 'EMPLOYEE';
+  supervisor_id?: number | null;
+  worker_type?: 'LABOUR' | 'EMPLOYEE' | 'SUPERVISOR';
+  worker_name?: string | null;
+  skill_or_trade?: string | null;
+  phone?: string | null;
+  work_email?: string | null;
   leave_type: 'SICK' | 'CASUAL' | 'EMERGENCY' | 'UNPAID';
   from_date: string;
   to_date: string;
@@ -270,6 +281,7 @@ export interface LeaveRecord {
   status: LeaveStatus;
   applied_on: string;
   approved_by?: string | null;
+  approved_at?: string | null;
   decision_date?: string | null;
   remarks?: string | null;
 }
@@ -326,19 +338,23 @@ export interface MaterialRequestRecord {
   estimated_unit_cost?: number;
   estimated_value: number;
   actual_value?: number;
-  actual_expenditure: number;
+  actual_expenditure?: number;
   project_id: number;
   site_id: number;
   supervisor_id: number;
   supplier_id?: number | null;
   request_date: string;
   required_date?: string;
-  status: MaterialRequestStatus;
+  status?: MaterialRequestStatus;
   approval_status?: 'PENDING' | 'APPROVED' | 'REJECTED';
   delivery_status?: 'REQUESTED' | 'ORDERED' | 'PARTIALLY_DELIVERED' | 'DELIVERED' | 'USED';
   approved_by?: string | null;
   remarks?: string | null;
-  notes?: string;
+  notes?: string | null;
+  delivery_photo_url?: string | null;
+  delivery_photo_bucket_path?: string | null;
+  delivered_by?: string | null;
+  delivered_at?: string | null;
 }
 
 export interface SupplierRecord {
@@ -347,14 +363,23 @@ export interface SupplierRecord {
   phone: string;
   email?: string;
   address: string;
-  supplied_materials?: string;
+  supplied_materials?: string | null;
+  quoted_rate?: number | null;
+  quoted_qty?: number | null;
+  rate_unit?: string | null;
   quotation_rate?: number;
   quotation_unit?: string;
   quoted_quantity?: number;
   total_quotation_amount?: number;
   supplied_qty?: number;
   total_order_value?: number;
-  delivery_status?: string;
+  delivery_status?: string | null;
+  delivery_address?: string | null;
+  project_id?: number | null;
+  delivery_photo_url?: string | null;
+  delivery_photo_bucket_path?: string | null;
+  delivered_by?: string | null;
+  delivered_at?: string | null;
   status: 'ACTIVE' | 'INACTIVE';
   created_at: string;
 }

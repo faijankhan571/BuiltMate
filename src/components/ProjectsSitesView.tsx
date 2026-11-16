@@ -12,6 +12,13 @@ import {
 import { useWorkforce } from '../context/WorkforceContext';
 import { ProjectRecord, SiteRecord } from '../types';
 import { ConfirmDialog } from './ConfirmDialog';
+import { GoogleMapsSitesPanel } from './GoogleMapsSitesPanel';
+import {
+  validateWorkEmail,
+  validate10DigitPhone,
+  sanitize10DigitPhone,
+} from '../utils/workforceLogic';
+
 
 interface ProjectsSitesViewProps {
   initialTab?: 'projects' | 'sites';
@@ -87,6 +94,8 @@ export const ProjectsSitesView: React.FC<ProjectsSitesViewProps> = ({
     phone: '',
     address: '',
   });
+  const [supEmailError, setSupEmailError] = useState<string | null>(null);
+  const [supPhoneError, setSupPhoneError] = useState<string | null>(null);
 
   // Delete Confirmations
   const [deleteProjTarget, setDeleteProjTarget] = useState<ProjectRecord | null>(null);
@@ -108,9 +117,32 @@ export const ProjectsSitesView: React.FC<ProjectsSitesViewProps> = ({
 
   const handleCreateSupervisor = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!supForm.name.trim()) return;
+    setSupEmailError(null);
+    setSupPhoneError(null);
+
+    const trimmedName = supForm.name.trim();
+    const cleanEmail = supForm.email.trim().toLowerCase();
+    const cleanPhone = sanitize10DigitPhone(supForm.phone);
+
+    if (!trimmedName) return;
+
+    const emailValidation = validateWorkEmail(cleanEmail);
+    if (!emailValidation.valid) {
+      setSupEmailError(emailValidation.error || 'Work email must end with @buildmate.ac.in');
+      return;
+    }
+
+    const phoneValidation = validate10DigitPhone(cleanPhone);
+    if (!phoneValidation.valid) {
+      setSupPhoneError(phoneValidation.error || 'Phone number must have exactly 10 digits');
+      return;
+    }
+
     await addSiteSupervisor({
       ...supForm,
+      name: trimmedName,
+      email: cleanEmail,
+      phone: cleanPhone,
       user_id: null,
       status: 'ACTIVE',
     });
@@ -126,10 +158,7 @@ export const ProjectsSitesView: React.FC<ProjectsSitesViewProps> = ({
             Construction Projects &amp; Site Operations
           </h1>
           <p className="text-xs text-slate-600 mt-1">
-            Connected to <code className="font-mono text-blue-700">public.projects</code>,{' '}
-            <code className="font-mono text-blue-700">public.sites</code>, and{' '}
-            <code className="font-mono text-blue-700">public.site_supervisors</code> · Includes Grid
-            &amp; Table Views with Site Attendance Rate
+            Multi-project infrastructure directory, operational construction sites, and site supervisor assignments
           </p>
         </div>
 
@@ -436,6 +465,9 @@ export const ProjectsSitesView: React.FC<ProjectsSitesViewProps> = ({
       {/* TAB 2: SITES & SUPERVISORS */}
       {activeTab === 'sites' && (
         <div className="space-y-6">
+          {/* Interactive Google Maps Platform + Gemini Maps Grounding */}
+          <GoogleMapsSitesPanel />
+
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
@@ -796,7 +828,7 @@ export const ProjectsSitesView: React.FC<ProjectsSitesViewProps> = ({
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60">
           <div className="bg-white rounded-xl border border-slate-200 max-w-md w-full p-6 shadow-xl text-xs">
             <h3 className="font-display text-base font-bold text-slate-900 mb-4">
-              Register Site Supervisor (public.site_supervisors)
+              Register Site Supervisor
             </h3>
             <form onSubmit={handleCreateSupervisor} className="space-y-3">
               <div>
@@ -804,30 +836,61 @@ export const ProjectsSitesView: React.FC<ProjectsSitesViewProps> = ({
                 <input
                   type="text"
                   required
+                  placeholder="e.g. Imran Shaikh"
                   value={supForm.name}
                   onChange={(e) => setSupForm({ ...supForm, name: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:border-blue-600"
                 />
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Email *</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block font-semibold text-slate-700">Official Email *</label>
+                  <span className="text-[10px] text-blue-700 font-mono">@buildmate.ac.in required</span>
+                </div>
                 <input
                   type="email"
                   required
+                  pattern=".+@buildmate\.ac\.in"
+                  title="Work email must end with @buildmate.ac.in"
+                  placeholder="e.g. imran.shaikh@buildmate.ac.in"
                   value={supForm.email}
-                  onChange={(e) => setSupForm({ ...supForm, email: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300"
+                  onChange={(e) => {
+                    setSupForm({ ...supForm, email: e.target.value });
+                    if (supEmailError) setSupEmailError(null);
+                  }}
+                  className={`w-full px-3 py-2 rounded-lg border focus:outline-none ${
+                    supEmailError ? 'border-red-400 bg-red-50/30' : 'border-slate-300 focus:border-blue-600'
+                  }`}
                 />
+                {supEmailError && (
+                  <p className="text-[11px] text-red-600 mt-1">{supEmailError}</p>
+                )}
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Phone *</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block font-semibold text-slate-700">Phone Number *</label>
+                  <span className="text-[10px] text-slate-500 font-mono">10 digits only</span>
+                </div>
                 <input
-                  type="text"
+                  type="tel"
                   required
+                  maxLength={10}
+                  pattern="[0-9]{10}"
+                  title="Phone number must have exactly 10 digits"
+                  placeholder="e.g. 9000000042"
                   value={supForm.phone}
-                  onChange={(e) => setSupForm({ ...supForm, phone: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300"
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/\D/g, '').slice(0, 10);
+                    setSupForm({ ...supForm, phone: digits });
+                    if (supPhoneError) setSupPhoneError(null);
+                  }}
+                  className={`w-full px-3 py-2 rounded-lg border font-mono focus:outline-none ${
+                    supPhoneError ? 'border-red-400 bg-red-50/30' : 'border-slate-300 focus:border-blue-600'
+                  }`}
                 />
+                {supPhoneError && (
+                  <p className="text-[11px] text-red-600 mt-1">{supPhoneError}</p>
+                )}
               </div>
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
                 <button

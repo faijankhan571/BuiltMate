@@ -731,9 +731,8 @@ export const PayrollView: React.FC = () => {
             Accountant &amp; Payroll Management
           </h1>
           <p className="text-xs text-slate-600 mt-1">
-            Connected to <code className="font-mono text-blue-700">public.salary</code> &amp;{' '}
-            <code className="font-mono text-blue-700">public.attendance</code> · Calculates Salaried
-            Employee Payroll &amp; Daily/Hourly Labour Wages from Logged Attendance
+            Workforce payroll register &amp; wage ledger · Calculates salaried
+            employee payroll &amp; daily/hourly labour wages from logged attendance
           </p>
         </div>
 
@@ -920,8 +919,7 @@ export const PayrollView: React.FC = () => {
                 <span>Live Attendance-Derived Wage &amp; Overtime Sheet (Skilled Labourers)</span>
               </h3>
               <p className="text-xs text-slate-500">
-                Computed directly from <code className="font-mono">public.attendance</code> logs and{' '}
-                <code className="font-mono">public.labours</code> daily/hourly rates
+                Computed directly from daily attendance logs and trade wage rates
               </p>
             </div>
           </div>
@@ -957,7 +955,7 @@ export const PayrollView: React.FC = () => {
                       <td className="py-3 px-4">
                         <div className="font-semibold text-slate-900">{lab.name}</div>
                         <div className="text-[11px] text-slate-500">
-                          #{lab.labour_id} · {lab.skill}
+                          {lab.user_id || lab.labour_code || `#${lab.labour_id}`} · {lab.skill}
                         </div>
                       </td>
                       <td className="py-3 px-4 font-mono">
@@ -1046,7 +1044,7 @@ export const PayrollView: React.FC = () => {
                   >
                     {employees.map((emp) => (
                       <option key={emp.employee_id} value={emp.employee_id}>
-                        {emp.name} ({emp.designation})
+                        {emp.user_id || emp.employee_code || `#${emp.employee_id}`} — {emp.name} ({emp.designation})
                       </option>
                     ))}
                   </select>
@@ -1065,7 +1063,7 @@ export const PayrollView: React.FC = () => {
                   >
                     {labours.map((lab) => (
                       <option key={lab.labour_id} value={lab.labour_id}>
-                        {lab.name} ({lab.skill} · ₹{lab.wage_rate}/day)
+                        {lab.user_id || lab.labour_code || `#${lab.labour_id}`} — {lab.name} ({lab.skill} · ₹{lab.wage_rate}/day)
                       </option>
                     ))}
                   </select>
