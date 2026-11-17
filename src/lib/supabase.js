@@ -1,16 +1,18 @@
 import { createClient } from '@supabase/supabase-js';
 
+const metaEnv = (typeof import.meta !== 'undefined' && import.meta.env) || {};
+
 const rawUrl = (
-  import.meta.env.VITE_SUPABASE_URL || 'https://uznmqmvafuyyzgshsogx.supabase.co'
+  metaEnv.VITE_SUPABASE_URL || 'https://uznmqmvafuyyzgshsogx.supabase.co'
 ).trim();
 const rawKey = (
-  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-  import.meta.env.VITE_SUPABASE_ANON_KEY ||
+  metaEnv.VITE_SUPABASE_PUBLISHABLE_KEY ||
+  metaEnv.VITE_SUPABASE_ANON_KEY ||
   'sb_publishable__A2zXL397Egt6QGqJB1NfQ_GdSEkigH'
 ).trim();
 
 // Repair 1-char truncation if VITE_SUPABASE_PUBLISHABLE_KEY was pasted missing trailing 'H'
-const supabasePublishableKey =
+export const supabasePublishableKey =
   rawKey.startsWith('sb_publishable__A2zXL397Egt6QGqJB1NfQ_GdSEkig') &&
   rawKey.endsWith('fQ_GdSEkig')
     ? `${rawKey}H`
@@ -25,14 +27,50 @@ export const isSupabaseConfigured = Boolean(
     supabaseUrl.startsWith('http')
 );
 
-async function blobToBase64(blob) {
-  const buf = await blob.arrayBuffer();
+async function arrayBufferToBase64(buf) {
   const bytes = new Uint8Array(buf);
   let binary = '';
   for (let i = 0; i < bytes.byteLength; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
+}
+
+async function bodyToBase64AndContentType(body) {
+  if (!body) return { bodyBase64: undefined, detectedContentType: undefined };
+  if (typeof body.arrayBuffer === 'function') {
+    const buf = await body.arrayBuffer();
+    return {
+      bodyBase64: await arrayBufferToBase64(buf),
+      detectedContentType: body.type || undefined,
+    };
+  }
+  if (body instanceof ArrayBuffer) {
+    return {
+      bodyBase64: await arrayBufferToBase64(body),
+      detectedContentType: undefined,
+    };
+  }
+  if (ArrayBuffer.isView(body)) {
+    return {
+      bodyBase64: await arrayBufferToBase64(
+        body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength)
+      ),
+      detectedContentType: undefined,
+    };
+  }
+  if (typeof FormData !== 'undefined' && body instanceof FormData) {
+    for (const [, value] of body.entries()) {
+      if (value && typeof value === 'object' && typeof value.arrayBuffer === 'function') {
+        const buf = await value.arrayBuffer();
+        return {
+          bodyBase64: await arrayBufferToBase64(buf),
+          detectedContentType: value.type || 'image/jpeg',
+        };
+      }
+    }
+  }
+  return { bodyBase64: undefined, detectedContentType: undefined };
 }
 
 async function customSupabaseFetch(input, init) {
@@ -56,8 +94,16 @@ async function customSupabaseFetch(input, init) {
       }
       let bodyStr = typeof init?.body === 'string' ? init.body : undefined;
       let bodyBase64 = undefined;
-      if (!bodyStr && init?.body && typeof init.body.arrayBuffer === 'function') {
-        bodyBase64 = await blobToBase64(init.body);
+      if (!bodyStr && init?.body) {
+        const converted = await bodyToBase64AndContentType(init.body);
+        bodyBase64 = converted.bodyBase64;
+        if (
+          converted.detectedContentType &&
+          (!headersObj['content-type'] ||
+            String(headersObj['content-type']).includes('multipart/form-data'))
+        ) {
+          headersObj['content-type'] = converted.detectedContentType;
+        }
       }
       const proxyRes = await window.fetch('/api/supabase-proxy', {
         method: 'POST',

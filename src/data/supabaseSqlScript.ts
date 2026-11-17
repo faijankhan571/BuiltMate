@@ -641,4 +641,161 @@ SELECT id, COALESCE(raw_user_meta_data->>'full_name', 'Rameshwar Prasad Yadav'),
 FROM auth.users
 WHERE email IN ('rameshwar.yadav@buildmate.in', 'labourer@buildmate.in')
 ON CONFLICT (user_id) DO UPDATE SET is_active = TRUE, work_email = EXCLUDED.work_email;
+
+-- ----------------------------------------------------------------------------
+-- STEP 6: SUPABASE STORAGE BUCKETS & RLS POLICIES FOR ALL 6 ROLE BUCKETS
+-- Fixes "POLICIES: 0 / new row violates row-level security policy" on storage.objects
+-- ----------------------------------------------------------------------------
+
+INSERT INTO storage.buckets (id, name, public)
+VALUES
+  ('Employees Attendence Images', 'Employees Attendence Images', true),
+  ('Labour attendance Image', 'Labour attendance Image', true),
+  ('Accountant Attendace Images', 'Accountant Attendace Images', true),
+  ('HR Managers Attendance Images', 'HR Managers Attendance Images', true),
+  ('Admin Attendance Images', 'Admin Attendance Images', true),
+  ('Material Delivered images', 'Material Delivered images', true)
+ON CONFLICT (id) DO UPDATE SET public = true;
+
+DROP POLICY IF EXISTS "buildmate_storage_select_all_6_buckets" ON storage.objects;
+CREATE POLICY "buildmate_storage_select_all_6_buckets"
+ON storage.objects FOR SELECT
+TO public, anon, authenticated
+USING (
+  bucket_id IN (
+    'Employees Attendence Images',
+    'Labour attendance Image',
+    'Accountant Attendace Images',
+    'HR Managers Attendance Images',
+    'Admin Attendance Images',
+    'Material Delivered images'
+  )
+);
+
+DROP POLICY IF EXISTS "buildmate_storage_insert_all_6_buckets" ON storage.objects;
+CREATE POLICY "buildmate_storage_insert_all_6_buckets"
+ON storage.objects FOR INSERT
+TO public, anon, authenticated
+WITH CHECK (
+  bucket_id IN (
+    'Employees Attendence Images',
+    'Labour attendance Image',
+    'Accountant Attendace Images',
+    'HR Managers Attendance Images',
+    'Admin Attendance Images',
+    'Material Delivered images'
+  )
+);
+
+DROP POLICY IF EXISTS "buildmate_storage_update_all_6_buckets" ON storage.objects;
+CREATE POLICY "buildmate_storage_update_all_6_buckets"
+ON storage.objects FOR UPDATE
+TO public, anon, authenticated
+USING (
+  bucket_id IN (
+    'Employees Attendence Images',
+    'Labour attendance Image',
+    'Accountant Attendace Images',
+    'HR Managers Attendance Images',
+    'Admin Attendance Images',
+    'Material Delivered images'
+  )
+)
+WITH CHECK (
+  bucket_id IN (
+    'Employees Attendence Images',
+    'Labour attendance Image',
+    'Accountant Attendace Images',
+    'HR Managers Attendance Images',
+    'Admin Attendance Images',
+    'Material Delivered images'
+  )
+);
+
+DROP POLICY IF EXISTS "buildmate_storage_delete_all_6_buckets" ON storage.objects;
+CREATE POLICY "buildmate_storage_delete_all_6_buckets"
+ON storage.objects FOR DELETE
+TO public, anon, authenticated
+USING (
+  bucket_id IN (
+    'Employees Attendence Images',
+    'Labour attendance Image',
+    'Accountant Attendace Images',
+    'HR Managers Attendance Images',
+    'Admin Attendance Images',
+    'Material Delivered images'
+  )
+);
 `;
+
+export const SUPABASE_STORAGE_BUCKETS_SQL = `-- ============================================================================
+-- BUILDMATE — ENABLE UPLOAD & VIEW POLICIES FOR ALL 6 ROLE STORAGE BUCKETS
+-- Run in Supabase Dashboard -> SQL Editor to change POLICIES from 0 to Active
+-- ============================================================================
+
+INSERT INTO storage.buckets (id, name, public)
+VALUES
+  ('Employees Attendence Images', 'Employees Attendence Images', true),
+  ('Labour attendance Image', 'Labour attendance Image', true),
+  ('Accountant Attendace Images', 'Accountant Attendace Images', true),
+  ('HR Managers Attendance Images', 'HR Managers Attendance Images', true),
+  ('Admin Attendance Images', 'Admin Attendance Images', true),
+  ('Material Delivered images', 'Material Delivered images', true)
+ON CONFLICT (id) DO UPDATE SET public = true;
+
+DROP POLICY IF EXISTS "buildmate_storage_select_all_6_buckets" ON storage.objects;
+CREATE POLICY "buildmate_storage_select_all_6_buckets"
+ON storage.objects FOR SELECT
+TO public, anon, authenticated
+USING (
+  bucket_id IN (
+    'Employees Attendence Images',
+    'Labour attendance Image',
+    'Accountant Attendace Images',
+    'HR Managers Attendance Images',
+    'Admin Attendance Images',
+    'Material Delivered images'
+  )
+);
+
+DROP POLICY IF EXISTS "buildmate_storage_insert_all_6_buckets" ON storage.objects;
+CREATE POLICY "buildmate_storage_insert_all_6_buckets"
+ON storage.objects FOR INSERT
+TO public, anon, authenticated
+WITH CHECK (
+  bucket_id IN (
+    'Employees Attendence Images',
+    'Labour attendance Image',
+    'Accountant Attendace Images',
+    'HR Managers Attendance Images',
+    'Admin Attendance Images',
+    'Material Delivered images'
+  )
+);
+
+DROP POLICY IF EXISTS "buildmate_storage_update_all_6_buckets" ON storage.objects;
+CREATE POLICY "buildmate_storage_update_all_6_buckets"
+ON storage.objects FOR UPDATE
+TO public, anon, authenticated
+USING (
+  bucket_id IN (
+    'Employees Attendence Images',
+    'Labour attendance Image',
+    'Accountant Attendace Images',
+    'HR Managers Attendance Images',
+    'Admin Attendance Images',
+    'Material Delivered images'
+  )
+)
+WITH CHECK (
+  bucket_id IN (
+    'Employees Attendence Images',
+    'Labour attendance Image',
+    'Accountant Attendace Images',
+    'HR Managers Attendance Images',
+    'Admin Attendance Images',
+    'Material Delivered images'
+  )
+);
+`;
+

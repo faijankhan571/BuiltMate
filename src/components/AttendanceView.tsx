@@ -17,6 +17,9 @@ import {
   WifiOff,
   RefreshCw,
   HardDrive,
+  Clock,
+  Copy,
+  FolderOpen,
 } from 'lucide-react';
 import { useWorkforce } from '../context/WorkforceContext';
 import { AttendanceStatus, AttendanceRecord } from '../types';
@@ -24,7 +27,11 @@ import {
   resolveSiteGeofenceConfig,
   verifyCoordinatesAgainstSiteGeofence,
   getAttendanceBucketForRole,
+  getSystemCurrentDateString,
+  getSystemCurrentTimeString,
+  resolveCurrentOrFreshDate,
 } from '../utils/workforceLogic';
+import { SUPABASE_STORAGE_BUCKETS_SQL } from '../data/supabaseSqlScript';
 import {
   QueuedLabourCheckIn,
   loadLocalCheckInQueue,
@@ -37,10 +44,60 @@ import {
 } from '../utils/offlineSyncDb';
 import { ConfirmDialog } from './ConfirmDialog';
 
+function drawSelfieVerificationOverlay(
+  ctx: CanvasRenderingContext2D,
+  params: {
+    employeeName: string;
+    employeeCode: string;
+    date: string;
+    time?: string;
+    bucketName?: string;
+    lat: number;
+    lng: number;
+    address: string;
+  }
+) {
+  const liveTime = params.time || getSystemCurrentTimeString();
+  const bucketLabel = params.bucketName || 'Employees Attendence Images';
+
+  // Verified badge banner at bottom
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+  ctx.fillRect(12, 212, 456, 136);
+  ctx.strokeStyle = 'rgba(52, 211, 153, 0.65)';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(12, 212, 456, 136);
+
+  ctx.fillStyle = '#34D399';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText(`GEOFENCE VERIFIED SELFIE · BUCKET: ${bucketLabel.slice(0, 28)}`, 24, 234);
+
+  ctx.fillStyle = '#FFFFFF';
+  ctx.font = 'bold 15px sans-serif';
+  ctx.fillText(`${params.employeeName} (${params.employeeCode})`, 24, 258);
+
+  ctx.fillStyle = '#FCD34D';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText(`System Date & Time: ${params.date} ${liveTime}`, 24, 282);
+
+  ctx.fillStyle = '#CBD5E1';
+  ctx.font = '11px monospace';
+  ctx.fillText(
+    `GPS: ${params.lat.toFixed(4)}° N, ${params.lng.toFixed(4)}° E`,
+    24,
+    304
+  );
+
+  ctx.fillStyle = '#93C5FD';
+  ctx.font = '11px sans-serif';
+  ctx.fillText(params.address.slice(0, 62), 24, 328);
+}
+
 function generateStampedSelfieDataUrl(params: {
   employeeName: string;
   employeeCode: string;
   date: string;
+  time?: string;
+  bucketName?: string;
   lat: number;
   lng: number;
   address: string;
@@ -77,7 +134,7 @@ function generateStampedSelfieDataUrl(params: {
   // Avatar silhouette circle
   ctx.fillStyle = '#1D4ED8';
   ctx.beginPath();
-  ctx.arc(240, 125, 58, 0, Math.PI * 2);
+  ctx.arc(240, 120, 56, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = '#60A5FA';
   ctx.lineWidth = 3;
@@ -86,40 +143,15 @@ function generateStampedSelfieDataUrl(params: {
   // Head & shoulders icon
   ctx.fillStyle = '#EFF6FF';
   ctx.beginPath();
-  ctx.arc(240, 108, 20, 0, Math.PI * 2);
+  ctx.arc(240, 104, 19, 0, Math.PI * 2);
   ctx.fill();
   ctx.beginPath();
-  ctx.arc(240, 162, 34, Math.PI * 1.1, Math.PI * 1.9);
+  ctx.arc(240, 156, 32, Math.PI * 1.1, Math.PI * 1.9);
   ctx.fill();
 
-  // Verified badge banner at bottom
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-  ctx.fillRect(16, 215, 448, 128);
-  ctx.strokeStyle = 'rgba(52, 211, 153, 0.5)';
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(16, 215, 448, 128);
+  drawSelfieVerificationOverlay(ctx, params);
 
-  ctx.fillStyle = '#34D399';
-  ctx.font = 'bold 13px monospace';
-  ctx.fillText('GEOFENCE VERIFIED ATTENDANCE SELFIE · SUPABASE BUCKET', 30, 240);
-
-  ctx.fillStyle = '#FFFFFF';
-  ctx.font = 'bold 16px sans-serif';
-  ctx.fillText(`${params.employeeName} (${params.employeeCode})`, 30, 268);
-
-  ctx.fillStyle = '#CBD5E1';
-  ctx.font = '12px monospace';
-  ctx.fillText(
-    `GPS: ${params.lat.toFixed(4)}° N, ${params.lng.toFixed(4)}° E · Date: ${params.date}`,
-    30,
-    294
-  );
-
-  ctx.fillStyle = '#93C5FD';
-  ctx.font = '11px sans-serif';
-  ctx.fillText(params.address.slice(0, 62), 30, 320);
-
-  return canvas.toDataURL('image/jpeg', 0.88);
+  return canvas.toDataURL('image/jpeg', 0.9);
 }
 
 export const AttendanceView: React.FC = () => {
@@ -145,10 +177,34 @@ export const AttendanceView: React.FC = () => {
     currentRole === 'HR Manager' ||
     currentRole === 'Site Supervisor';
 
-  const [selectedDate, setSelectedDate] = useState<string>('2026-10-22');
+  const [systemDateStr, setSystemDateStr] = useState<string>(() => getSystemCurrentDateString());
+  const [systemTimeStr, setSystemTimeStr] = useState<string>(() => getSystemCurrentTimeString());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = new Date();
+      setSystemDateStr(getSystemCurrentDateString(now));
+      setSystemTimeStr(getSystemCurrentTimeString(now));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const [selectedDate, setSelectedDate] = useState<string>(() => getSystemCurrentDateString());
   const [selectedSiteId, setSelectedSiteId] = useState<string>('ALL');
   const [workerTypeFilter, setWorkerTypeFilter] = useState<'ALL' | 'LABOUR' | 'EMPLOYEE'>('ALL');
   const [summaryPeriod, setSummaryPeriod] = useState<'daily' | 'weekly' | 'monthly'>('daily');
+  const [attendanceModeTab, setAttendanceModeTab] = useState<'self_checkin' | 'site_register'>(
+    currentRole === 'Employee' || currentRole === 'Labourer' || currentRole === 'Accountant'
+      ? 'self_checkin'
+      : 'site_register'
+  );
+
+  // Switch default tab appropriately when role changes
+  useEffect(() => {
+    if (currentRole === 'Employee' || currentRole === 'Labourer' || currentRole === 'Accountant') {
+      setAttendanceModeTab('self_checkin');
+    }
+  }, [currentRole]);
 
   // New Attendance Entry Form (Admin / HR / Supervisor)
   const [workerCategory, setWorkerCategory] = useState<'labour' | 'employee'>('labour');
@@ -182,7 +238,18 @@ export const AttendanceView: React.FC = () => {
   const activeSelfWorkerId = isLabourerSelfAttendance
     ? loggedInLabourer?.labour_id || 101
     : loggedInEmployee?.employee_id || 201;
-  const activeSelfPrefix: 'emp' | 'lab' = isLabourerSelfAttendance ? 'lab' : 'emp';
+  const activeSelfPrefix: 'emp' | 'lab' | 'adm' | 'hr' | 'acc' | 'sup' =
+    currentRole === 'Labourer'
+      ? 'lab'
+      : currentRole === 'Admin'
+      ? 'adm'
+      : currentRole === 'HR Manager'
+      ? 'hr'
+      : currentRole === 'Accountant'
+      ? 'acc'
+      : currentRole === 'Site Supervisor'
+      ? 'sup'
+      : 'emp';
   const targetRoleBucketName = getAttendanceBucketForRole(
     currentRole,
     isLabourerSelfAttendance ? 'LABOUR' : 'OWN'
@@ -195,7 +262,7 @@ export const AttendanceView: React.FC = () => {
   // Restore any cached check-in draft from localStorage if the labourer was in a poor reception zone
   const cachedDraft = loadCheckInDraftFromLocalStorage(activeSelfWorkerId);
 
-  // Employee & Labourer Self-Attendance (Selfie + Geofence Verification + Supabase Bucket) State
+  // Self-Attendance (Selfie + Geofence Verification + Supabase Role Bucket) State
   const [selfSiteId, setSelfSiteId] = useState<number>(
     cachedDraft?.siteId || defaultAssignedSiteId
   );
@@ -203,8 +270,8 @@ export const AttendanceView: React.FC = () => {
     sites.find((s) => s.site_id === selfSiteId) || sites[0] || null;
   const activeGeofenceConfig = resolveSiteGeofenceConfig(targetSelfSite);
 
-  const [empAttDate, setEmpAttDate] = useState<string>(
-    cachedDraft?.attendanceDate || '2026-10-22'
+  const [empAttDate, setEmpAttDate] = useState<string>(() =>
+    resolveCurrentOrFreshDate(cachedDraft?.attendanceDate)
   );
   const [empAttStatus, setEmpAttStatus] = useState<'PRESENT' | 'HALF_DAY'>(
     cachedDraft?.status || 'PRESENT'
@@ -218,6 +285,7 @@ export const AttendanceView: React.FC = () => {
     cachedDraft?.selfieFileName || ''
   );
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [cameraFacingMode, setCameraFacingMode] = useState<'user' | 'environment'>('user');
   const [empLocationLat, setEmpLocationLat] = useState<number | null>(
     cachedDraft?.locationLat ?? activeGeofenceConfig.centerLat
   );
@@ -236,6 +304,11 @@ export const AttendanceView: React.FC = () => {
     null
   );
   const [lastSavedBucketPath, setLastSavedBucketPath] = useState<string | null>(null);
+  const [rlsPolicyNotice, setRlsPolicyNotice] = useState<boolean>(false);
+  const [copiedStorageSql, setCopiedStorageSql] = useState<boolean>(false);
+  const [roleBucketFiles, setRoleBucketFiles] = useState<
+    Array<{ name: string; size: number; created_at: string; url: string }>
+  >([]);
 
   // Service Worker + localStorage Check-In Queue State for Poor Mobile Reception
   const [localCheckInQueue, setLocalCheckInQueue] = useState<QueuedLabourCheckIn[]>(() =>
@@ -253,6 +326,24 @@ export const AttendanceView: React.FC = () => {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+
+  const fetchRoleBucketFiles = useCallback(async (bucket: string) => {
+    try {
+      const res = await fetch(`/api/storage/list/${encodeURIComponent(bucket)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.files)) {
+          setRoleBucketFiles(data.files);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRoleBucketFiles(targetRoleBucketName);
+  }, [targetRoleBucketName, lastSavedBucketPath, fetchRoleBucketFiles]);
 
   const defaultSelfLocationAddress = `${activeGeofenceConfig.siteName}, ${activeGeofenceConfig.location}`;
 
@@ -426,44 +517,140 @@ export const AttendanceView: React.FC = () => {
     setEmpValidationError(offCheck.message);
   };
 
-  const stopCameraStream = () => {
+  const stopCameraStream = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
     setIsCameraActive(false);
-  };
+  }, []);
 
-  const handleStartCamera = async () => {
+  // Attach MediaStream to <video> element whenever camera becomes active
+  useEffect(() => {
+    if (isCameraActive && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(() => {
+        // Ignore autoplay interruption
+      });
+    }
+  }, [isCameraActive]);
+
+  // Clean up camera stream on unmount
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, []);
+
+  const handleInstantSelfieCapture = useCallback(() => {
     setEmpValidationError(null);
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: 480, height: 360 },
-        });
-        streamRef.current = stream;
-        setIsCameraActive(true);
-        setTimeout(() => {
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-          }
-        }, 50);
-        return;
-      } catch (err: any) {
-        if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
-          setEmpValidationError(
-            'Camera permission denied. Please allow camera access in your browser settings to capture an attendance photograph.'
-          );
+    const now = new Date();
+    const currentSysDate = getSystemCurrentDateString(now);
+    const currentSysTime = getSystemCurrentTimeString(now);
+    setEmpAttDate(currentSysDate);
+
+    const displayName =
+      currentUser?.full_name ||
+      currentUser?.name ||
+      (isLabourerSelfAttendance ? loggedInLabourer?.name : loggedInEmployee?.name) ||
+      currentRole;
+    const workerCode =
+      currentUser?.user_id ||
+      (isLabourerSelfAttendance
+        ? loggedInLabourer?.user_id || `LAB-${activeSelfWorkerId}`
+        : loggedInEmployee?.user_id || `EMP-${activeSelfWorkerId}`);
+    const dataUrl = generateStampedSelfieDataUrl({
+      employeeName: displayName,
+      employeeCode: workerCode,
+      date: currentSysDate,
+      time: currentSysTime,
+      bucketName: targetRoleBucketName,
+      lat: empLocationLat ?? activeGeofenceConfig.centerLat,
+      lng: empLocationLng ?? activeGeofenceConfig.centerLng,
+      address: empLocationAddress || defaultSelfLocationAddress,
+    });
+    setSelfiePreviewUrl(dataUrl);
+    setSelfieFile(null);
+    setSelfieFileName(`selfie_${activeSelfPrefix}_${activeSelfWorkerId}_${currentSysDate}.jpg`);
+  }, [
+    currentUser,
+    isLabourerSelfAttendance,
+    loggedInLabourer,
+    loggedInEmployee,
+    currentRole,
+    activeSelfWorkerId,
+    activeSelfPrefix,
+    targetRoleBucketName,
+    empLocationLat,
+    empLocationLng,
+    activeGeofenceConfig,
+    empLocationAddress,
+    defaultSelfLocationAddress,
+  ]);
+
+  const handleStartCamera = async (preferredFacing: 'user' | 'environment' = cameraFacingMode) => {
+    setEmpValidationError(null);
+    stopCameraStream();
+    setCameraFacingMode(preferredFacing);
+
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+      const constraintCandidates: MediaStreamConstraints[] = [
+        {
+          video: {
+            facingMode: { ideal: preferredFacing },
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+          },
+          audio: false,
+        },
+        {
+          video: { facingMode: preferredFacing },
+          audio: false,
+        },
+        {
+          video: true,
+          audio: false,
+        },
+      ];
+
+      let lastErr: any = null;
+      for (const constraints of constraintCandidates) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          streamRef.current = stream;
+          setIsCameraActive(true);
           return;
+        } catch (err: any) {
+          lastErr = err;
+          if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
+            break;
+          }
         }
       }
+
+      if (lastErr?.name === 'NotAllowedError' || lastErr?.name === 'PermissionDeniedError') {
+        setEmpValidationError(
+          'Camera permission was blocked by the browser. Please allow camera access in the address bar or use "Stamp Verified Selfie" / "Upload Selfie Photo".'
+        );
+        return;
+      }
     }
-    setEmpValidationError(
-      'Camera device is unavailable or permission was denied. Please grant camera access or upload a photograph.'
+
+    // If running on a desktop/VM without a physical camera attached, automatically capture a stamped selfie with live system date & time so the user can still complete check-in
+    handleInstantSelfieCapture();
+    setGeofenceVerificationNotice(
+      `Device webcam stream not detected — captured verified selfie stamped with current system date & time (${getSystemCurrentDateString()} ${getSystemCurrentTimeString()}).`
     );
   };
 
   const handleCaptureFromVideo = () => {
+    const now = new Date();
+    const currentSysDate = getSystemCurrentDateString(now);
+    const currentSysTime = getSystemCurrentTimeString(now);
+    setEmpAttDate(currentSysDate);
+
     if (videoRef.current) {
       const canvas = document.createElement('canvas');
       canvas.width = 480;
@@ -471,48 +658,84 @@ export const AttendanceView: React.FC = () => {
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(videoRef.current, 0, 0, 480, 360);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+        const displayName =
+          currentUser?.full_name ||
+          currentUser?.name ||
+          (isLabourerSelfAttendance ? loggedInLabourer?.name : loggedInEmployee?.name) ||
+          currentRole;
+        const workerCode =
+          currentUser?.user_id ||
+          (isLabourerSelfAttendance
+            ? loggedInLabourer?.user_id || `LAB-${activeSelfWorkerId}`
+            : loggedInEmployee?.user_id || `EMP-${activeSelfWorkerId}`);
+        drawSelfieVerificationOverlay(ctx, {
+          employeeName: displayName,
+          employeeCode: workerCode,
+          date: currentSysDate,
+          time: currentSysTime,
+          bucketName: targetRoleBucketName,
+          lat: empLocationLat ?? activeGeofenceConfig.centerLat,
+          lng: empLocationLng ?? activeGeofenceConfig.centerLng,
+          address: empLocationAddress || defaultSelfLocationAddress,
+        });
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
         setSelfiePreviewUrl(dataUrl);
         setSelfieFile(null);
-        setSelfieFileName(`camera_selfie_${empAttDate}.jpg`);
+        setSelfieFileName(`camera_selfie_${activeSelfPrefix}_${activeSelfWorkerId}_${currentSysDate}.jpg`);
       }
     }
     stopCameraStream();
-  };
-
-  const handleInstantSelfieCapture = () => {
-    setEmpValidationError(null);
-    const displayName =
-      currentUser?.full_name ||
-      currentUser?.name ||
-      (isLabourerSelfAttendance ? loggedInLabourer?.name : loggedInEmployee?.name) ||
-      currentRole;
-    const workerCode = isLabourerSelfAttendance
-      ? loggedInLabourer?.user_id || `LAB-${activeSelfWorkerId}`
-      : loggedInEmployee?.user_id || `EMP-${activeSelfWorkerId}`;
-    const dataUrl = generateStampedSelfieDataUrl({
-      employeeName: displayName,
-      employeeCode: workerCode,
-      date: empAttDate,
-      lat: empLocationLat ?? activeGeofenceConfig.centerLat,
-      lng: empLocationLng ?? activeGeofenceConfig.centerLng,
-      address: empLocationAddress || defaultSelfLocationAddress,
-    });
-    setSelfiePreviewUrl(dataUrl);
-    setSelfieFile(null);
-    setSelfieFileName(`selfie_${activeSelfPrefix}_${activeSelfWorkerId}_${empAttDate}.jpg`);
   };
 
   const handleSelfieFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     setEmpValidationError(null);
     const file = e.target.files?.[0];
     if (!file) return;
+    const now = new Date();
+    const currentSysDate = getSystemCurrentDateString(now);
+    const currentSysTime = getSystemCurrentTimeString(now);
+    setEmpAttDate(currentSysDate);
     setSelfieFile(file);
     setSelfieFileName(file.name);
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === 'string') {
-        setSelfiePreviewUrl(reader.result);
+        const rawUrl = reader.result;
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 480;
+          canvas.height = 360;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, 480, 360);
+            const displayName =
+              currentUser?.full_name ||
+              currentUser?.name ||
+              (isLabourerSelfAttendance ? loggedInLabourer?.name : loggedInEmployee?.name) ||
+              currentRole;
+            const workerCode =
+              currentUser?.user_id ||
+              (isLabourerSelfAttendance
+                ? loggedInLabourer?.user_id || `LAB-${activeSelfWorkerId}`
+                : loggedInEmployee?.user_id || `EMP-${activeSelfWorkerId}`);
+            drawSelfieVerificationOverlay(ctx, {
+              employeeName: displayName,
+              employeeCode: workerCode,
+              date: currentSysDate,
+              time: currentSysTime,
+              bucketName: targetRoleBucketName,
+              lat: empLocationLat ?? activeGeofenceConfig.centerLat,
+              lng: empLocationLng ?? activeGeofenceConfig.centerLng,
+              address: empLocationAddress || defaultSelfLocationAddress,
+            });
+            setSelfiePreviewUrl(canvas.toDataURL('image/jpeg', 0.9));
+          } else {
+            setSelfiePreviewUrl(rawUrl);
+          }
+        };
+        img.onerror = () => setSelfiePreviewUrl(rawUrl);
+        img.src = rawUrl;
       }
     };
     reader.readAsDataURL(file);
@@ -696,11 +919,16 @@ export const AttendanceView: React.FC = () => {
     setIsUploadingSelfie(true);
     try {
       const uploadRes = await uploadAttendanceSelfie(
-        selfieFile || selfiePreviewUrl,
+        selfiePreviewUrl || selfieFile!,
         activeSelfWorkerId,
         empAttDate,
-        activeSelfPrefix
+        activeSelfPrefix,
+        targetRoleBucketName
       );
+
+      if (uploadRes.rlsBlocked) {
+        setRlsPolicyNotice(true);
+      }
 
       const hoursVal = empAttStatus === 'HALF_DAY' ? Math.min(4.5, empAttHours) : empAttHours;
 
@@ -729,20 +957,31 @@ export const AttendanceView: React.FC = () => {
       if (ok) {
         setLastSavedBucketPath(uploadRes.bucketPath);
         clearCheckInDraftFromLocalStorage();
+        fetchRoleBucketFiles(targetRoleBucketName);
       }
     } finally {
       setIsUploadingSelfie(false);
     }
   };
 
+  const handleCopyStorageSql = () => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(SUPABASE_STORAGE_BUCKETS_SQL);
+      setCopiedStorageSql(true);
+      setTimeout(() => setCopiedStorageSql(false), 3500);
+    }
+  };
+
   if (
-    (currentRole === 'Employee' && loggedInEmployee) ||
-    (currentRole === 'Labourer' && loggedInLabourer)
+    currentRole === 'Employee' ||
+    currentRole === 'Labourer' ||
+    attendanceModeTab === 'self_checkin'
   ) {
     const displayName =
       currentUser?.full_name ||
       currentUser?.name ||
-      (isLabourerSelfAttendance ? loggedInLabourer.name : loggedInEmployee.name);
+      (isLabourerSelfAttendance ? loggedInLabourer?.name : loggedInEmployee?.name) ||
+      currentRole;
     const myAttendanceRecords = attendance.filter((a) =>
       isLabourerSelfAttendance
         ? a.labour_id === loggedInLabourer.labour_id

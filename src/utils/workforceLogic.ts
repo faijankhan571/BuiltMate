@@ -1038,7 +1038,7 @@ export const ROLE_PERMISSIONS: Record<
     canManageHr: false,
     canManageProjects: false,
     canManageSites: false,
-    canRecordAttendance: false,
+    canRecordAttendance: true,
     canManageTasks: false,
     canApproveLeaves: false,
     canSubmitLeaves: false,
@@ -2116,10 +2116,12 @@ export function getAttendanceBucketForRole(
   role: UserRole,
   targetWorkerType?: 'EMPLOYEE' | 'LABOUR' | 'OWN'
 ): string {
-  // Whenever a Site Supervisor, Admin, HR Manager, or Labourer captures an attendance photo for a Labourer,
-  // it saves in the "Labour attendance Image" bucket in Supabase.
+  // Explicit worker type override when Admin, HR, or Supervisor records attendance for a Labourer or Employee
   if (targetWorkerType === 'LABOUR' || role === 'Labourer') {
     return ATTENDANCE_STORAGE_BUCKETS.LABOUR;
+  }
+  if (targetWorkerType === 'EMPLOYEE' && role !== 'Employee') {
+    return ATTENDANCE_STORAGE_BUCKETS.EMPLOYEE;
   }
 
   switch (role) {
@@ -2134,6 +2136,54 @@ export function getAttendanceBucketForRole(
     default:
       return ATTENDANCE_STORAGE_BUCKETS.EMPLOYEE;
   }
+}
+
+/**
+ * Returns the current local system date in YYYY-MM-DD format (matches system clock in local timezone).
+ */
+export function getSystemCurrentDateString(now: Date = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Returns the current local system month in YYYY-MM format.
+ */
+export function getSystemCurrentMonthString(now: Date = new Date()): string {
+  return getSystemCurrentDateString(now).slice(0, 7);
+}
+
+/**
+ * Returns the current local system time in HH:MM:SS (24-hour) format.
+ */
+export function getSystemCurrentTimeString(now: Date = new Date()): string {
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+/**
+ * Returns the current local system date and time formatted as "YYYY-MM-DD HH:MM:SS".
+ */
+export function getSystemCurrentDateTimeDisplay(now: Date = new Date()): string {
+  return `${getSystemCurrentDateString(now)} ${getSystemCurrentTimeString(now)}`;
+}
+
+/**
+ * Replaces stale hardcoded default dates ('2026-10-22') with the live system date.
+ */
+export function resolveCurrentOrFreshDate(
+  storedDate?: string | null,
+  now: Date = new Date()
+): string {
+  const clean = (storedDate || '').trim();
+  if (!clean || clean === '2026-10-22') {
+    return getSystemCurrentDateString(now);
+  }
+  return clean;
 }
 
 /**

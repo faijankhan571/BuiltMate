@@ -1,7 +1,10 @@
 {
   "name": "BuildMate — Construction Labour & Workforce Operations",
   "description": "Enterprise construction labour, site assignment, attendance tracking, payroll, and AI-powered workforce management system with Supabase and Gemini.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]

@@ -68,6 +68,7 @@ import {
   hasDuplicateAttendance,
   getAttendanceBucketForRole,
   ATTENDANCE_STORAGE_BUCKETS,
+  getSystemCurrentDateString,
   sanitize10DigitPhone,
   normalizeProjectId,
 } from '../utils/workforceLogic';
@@ -209,13 +210,14 @@ interface WorkforceContextType {
     fileOrDataUrl: File | string,
     workerId: number,
     attendanceDate: string,
-    workerPrefix?: 'emp' | 'lab',
+    workerPrefix?: 'emp' | 'lab' | 'adm' | 'hr' | 'acc' | 'sup',
     customBucketName?: string
   ) => Promise<{
     selfieUrl: string;
     bucketPath: string;
     bucketName: string;
     uploadedToSupabase: boolean;
+    rlsBlocked?: boolean;
   }>;
 
   // CRUD: Tasks
@@ -296,8 +298,8 @@ interface WorkforceContextType {
   bulkImportRecords: (tableName: string, rows: Record<string, string>[]) => Promise<number>;
 }
 
-const STORAGE_PREFIX = 'bm_v12_';
-const AUTH_STORAGE_KEY = 'bm_v12_auth_user';
+const STORAGE_PREFIX = 'bm_v13_';
+const AUTH_STORAGE_KEY = 'bm_v13_auth_user';
 const THEME_STORAGE_KEY = 'bm_v3_theme_dark';
 
 function loadLocal<T>(key: string, fallback: T): T {
@@ -2317,23 +2319,40 @@ export const WorkforceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     fileOrDataUrl: File | string,
     workerId: number,
     attendanceDate: string,
-    workerPrefix?: 'emp' | 'lab',
+    workerPrefix?: 'emp' | 'lab' | 'adm' | 'hr' | 'acc' | 'sup',
     customBucketName?: string
   ): Promise<{
     selfieUrl: string;
     bucketPath: string;
     bucketName: string;
     uploadedToSupabase: boolean;
+    rlsBlocked?: boolean;
   }> => {
-    const safeDate = (attendanceDate || new Date().toISOString().slice(0, 10)).replace(
+    const safeDate = (attendanceDate || getSystemCurrentDateString()).replace(
       /[^0-9-]/g,
       ''
     );
-    const prefix = workerPrefix || (currentRole === 'Labourer' ? 'lab' : 'emp');
+    const defaultPrefix =
+      currentRole === 'Labourer'
+        ? 'lab'
+        : currentRole === 'Admin'
+        ? 'adm'
+        : currentRole === 'HR Manager'
+        ? 'hr'
+        : currentRole === 'Accountant'
+        ? 'acc'
+        : currentRole === 'Site Supervisor'
+        ? 'sup'
+        : 'emp';
+    const prefix = workerPrefix || defaultPrefix;
+    const targetWorkerType =
+      prefix === 'lab' ? 'LABOUR' : prefix === 'emp' && currentRole !== 'Employee' ? 'EMPLOYEE' : 'OWN';
     const bucketName =
-      customBucketName ||
-      getAttendanceBucketForRole(currentRole, prefix === 'lab' ? 'LABOUR' : 'OWN');
-    const objectKey = `selfies/${prefix}_${workerId}/${safeDate}_${Date.now()}.jpg`;
+      customBucketName || getAttendanceBucketForRole(currentRole, targetWorkerType);
+
+    // Store object key at root of role bucket (e.g. emp_201_2026-11-17_095512.jpg) so it is immediately visible in Supabase Storage > Files > Buckets > <Role Bucket>
+    const timeStamp = new Date().toTimeString().slice(0, 8).replace(/:/g, '');
+    const objectKey = `${prefix}_${workerId}_${safeDate}_${timeStamp}.jpg`;
     const fullBucketPath = `${bucketName}/${objectKey}`;
 
     let localDataUrl = '';
@@ -2357,50 +2376,85 @@ export const WorkforceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       });
     }
 
-    if (isOnline && supabase && uploadBlob) {
-      const candidateBuckets = [
-        bucketName,
-        bucketName.replace('Attendence', 'Attendance').replace('Attendace', 'Attendance'),
-        'attendance-selfies',
-      ];
-      for (const candidate of candidateBuckets) {
-        try {
-          const { error: uploadError } = await supabase.storage
-            .from(candidate)
-            .upload(objectKey, uploadBlob, {
-              upsert: true,
-              contentType: uploadBlob.type || 'image/jpeg',
-            });
-
-          if (!uploadError) {
-            const { data: pubData } = supabase.storage.from(candidate).getPublicUrl(objectKey);
-            const publicUrl = pubData?.publicUrl || localDataUrl;
+    // 1. Upload via server-side storage endpoint (/api/storage/upload) which uploads binary directly to Supabase Storage AND saves to role bucket storage
+    if (localDataUrl) {
+      try {
+        const apiRes = await fetch('/api/storage/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            bucketName,
+            objectKey,
+            base64Data: localDataUrl,
+            contentType: uploadBlob?.type || 'image/jpeg',
+          }),
+        });
+        if (apiRes.ok) {
+          const apiData = await apiRes.json();
+          if (apiData.uploadedToSupabase) {
             addToast(
               'success',
-              `Photo & GPS location saved to Supabase bucket "${bucketName}" (${fullBucketPath}).`
+              `Selfie saved directly to Supabase role bucket "${bucketName}" (${fullBucketPath}).`
             );
             return {
-              selfieUrl: localDataUrl || publicUrl,
+              selfieUrl: apiData.localServeUrl || localDataUrl,
               bucketPath: fullBucketPath,
               bucketName,
               uploadedToSupabase: true,
+              rlsBlocked: false,
             };
           }
-        } catch {
-          // Try next candidate bucket or fallback to localDataUrl + bucketPath reference
+
+          // Also try client-side supabase.storage upload if user has an active authenticated Supabase session
+          if (isOnline && supabase && uploadBlob) {
+            const { error: clientErr } = await supabase.storage
+              .from(bucketName)
+              .upload(objectKey, uploadBlob, {
+                upsert: true,
+                contentType: uploadBlob.type || 'image/jpeg',
+              });
+            if (!clientErr) {
+              addToast(
+                'success',
+                `Selfie saved directly to Supabase role bucket "${bucketName}" (${fullBucketPath}).`
+              );
+              return {
+                selfieUrl: apiData.localServeUrl || localDataUrl,
+                bucketPath: fullBucketPath,
+                bucketName,
+                uploadedToSupabase: true,
+                rlsBlocked: false,
+              };
+            }
+          }
+
+          addToast(
+            'success',
+            `Selfie saved to role storage bucket "${bucketName}" (${fullBucketPath}).`
+          );
+          return {
+            selfieUrl: apiData.localServeUrl || localDataUrl,
+            bucketPath: fullBucketPath,
+            bucketName,
+            uploadedToSupabase: Boolean(apiData.uploadedToSupabase),
+            rlsBlocked: Boolean(apiData.rlsBlocked),
+          };
         }
+      } catch {
+        // Fallback below
       }
     }
 
     addToast(
       'success',
-      `Photo & GPS location saved to Supabase bucket "${bucketName}" (${fullBucketPath}).`
+      `Photo & GPS location saved to role bucket "${bucketName}" (${fullBucketPath}).`
     );
     return {
       selfieUrl: localDataUrl,
       bucketPath: fullBucketPath,
       bucketName,
       uploadedToSupabase: Boolean(isOnline && supabase),
+      rlsBlocked: false,
     };
   };
 
@@ -3120,7 +3174,7 @@ export const WorkforceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '_')
       .slice(0, 24);
-    const objectKey = `delivered_materials/req_${refId}_${safeLabel}_${Date.now()}.jpg`;
+    const objectKey = `req_${refId}_${safeLabel}_${Date.now()}.jpg`;
     const fullBucketPath = `${bucketName}/${objectKey}`;
 
     let localDataUrl = '';
@@ -3144,31 +3198,33 @@ export const WorkforceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       });
     }
 
-    if (isOnline && supabase && uploadBlob) {
+    if (localDataUrl) {
       try {
-        const { error: uploadError } = await supabase.storage
-          .from(bucketName)
-          .upload(objectKey, uploadBlob, {
-            upsert: true,
-            contentType: uploadBlob.type || 'image/jpeg',
-          });
-
-        if (!uploadError) {
-          const { data: pubData } = supabase.storage.from(bucketName).getPublicUrl(objectKey);
-          const publicUrl = pubData?.publicUrl || localDataUrl;
+        const apiRes = await fetch('/api/storage/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            bucketName,
+            objectKey,
+            base64Data: localDataUrl,
+            contentType: uploadBlob?.type || 'image/jpeg',
+          }),
+        });
+        if (apiRes.ok) {
+          const apiData = await apiRes.json();
           addToast(
             'success',
-            `Delivered material photo saved to Supabase bucket "${bucketName}" (${fullBucketPath}).`
+            `Delivered material photo saved to bucket "${bucketName}" (${fullBucketPath}).`
           );
           return {
-            photoUrl: localDataUrl || publicUrl,
+            photoUrl: apiData.localServeUrl || localDataUrl,
             bucketPath: fullBucketPath,
             bucketName,
-            uploadedToSupabase: true,
+            uploadedToSupabase: Boolean(apiData.uploadedToSupabase),
           };
         }
       } catch {
-        // Fallback to localDataUrl + bucketPath reference
+        // Fallback below
       }
     }
 

@@ -24,6 +24,18 @@ import {
   RoleTableName,
 } from '../types';
 
+function formatLocalSystemDate(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+const SYSTEM_TODAY_DATE = formatLocalSystemDate(new Date());
+const SYSTEM_YESTERDAY_DATE = formatLocalSystemDate(
+  new Date(Date.now() - 24 * 60 * 60 * 1000)
+);
+
 export const ROLES: RoleRecord[] = [
   {
     role_id: 1,
@@ -2723,12 +2735,12 @@ export const INITIAL_ATTENDANCE: AttendanceRecord[] = [
     site_id: 1,
     labour_id: 101,
     employee_id: null,
-    attendance_date: '2026-10-22',
+    attendance_date: SYSTEM_TODAY_DATE,
     status: 'PRESENT',
     hours_worked: 9,
     overtime_hours: 1,
     recorded_by: 'Sachin Patil (SUP001)',
-    selfie_bucket_path: 'Labour attendance Image/selfies/lab_101/2026-10-22_site1.jpg',
+    selfie_bucket_path: `Labour attendance Image/lab_101_${SYSTEM_TODAY_DATE}_site1.jpg`,
     location_lat: 12.9698,
     location_lng: 77.75,
     location_address: '12.9698° N, 77.7500° E — Tower A — RCC Core & Formwork, Bengaluru',
@@ -2741,12 +2753,12 @@ export const INITIAL_ATTENDANCE: AttendanceRecord[] = [
     site_id: 1,
     labour_id: 103,
     employee_id: null,
-    attendance_date: '2026-10-22',
+    attendance_date: SYSTEM_TODAY_DATE,
     status: 'PRESENT',
     hours_worked: 8.5,
     overtime_hours: 0.5,
     recorded_by: 'Sachin Patil (SUP001)',
-    selfie_bucket_path: 'Labour attendance Image/selfies/lab_103/2026-10-22_site1.jpg',
+    selfie_bucket_path: `Labour attendance Image/lab_103_${SYSTEM_TODAY_DATE}_site1.jpg`,
     location_lat: 12.9699,
     location_lng: 77.7501,
     location_address: '12.9699° N, 77.7501° E — Tower A — RCC Core & Formwork, Bengaluru',
@@ -2759,7 +2771,7 @@ export const INITIAL_ATTENDANCE: AttendanceRecord[] = [
     site_id: 1,
     labour_id: 105,
     employee_id: null,
-    attendance_date: '2026-10-22',
+    attendance_date: SYSTEM_TODAY_DATE,
     status: 'LEAVE',
     hours_worked: 0,
     overtime_hours: 0,
@@ -2770,12 +2782,12 @@ export const INITIAL_ATTENDANCE: AttendanceRecord[] = [
     site_id: 2,
     labour_id: 102,
     employee_id: null,
-    attendance_date: '2026-10-22',
+    attendance_date: SYSTEM_TODAY_DATE,
     status: 'PRESENT',
     hours_worked: 10,
     overtime_hours: 2,
     recorded_by: 'Imran Shaikh (SUP002)',
-    selfie_bucket_path: 'Labour attendance Image/selfies/lab_102/2026-10-22_site2.jpg',
+    selfie_bucket_path: `Labour attendance Image/lab_102_${SYSTEM_TODAY_DATE}_site2.jpg`,
     location_lat: 19.1197,
     location_lng: 72.8679,
     location_address: '19.1197° N, 72.8679° E — Pier P-24 to P-38 Viaduct Launching, Mumbai',
@@ -2788,7 +2800,7 @@ export const INITIAL_ATTENDANCE: AttendanceRecord[] = [
     site_id: 3,
     labour_id: 104,
     employee_id: null,
-    attendance_date: '2026-10-22',
+    attendance_date: SYSTEM_TODAY_DATE,
     status: 'HALF_DAY',
     hours_worked: 4.5,
     overtime_hours: 0,
@@ -2799,12 +2811,12 @@ export const INITIAL_ATTENDANCE: AttendanceRecord[] = [
     site_id: 1,
     labour_id: null,
     employee_id: 201,
-    attendance_date: '2026-10-22',
+    attendance_date: SYSTEM_TODAY_DATE,
     status: 'PRESENT',
     hours_worked: 8.5,
     overtime_hours: 0.5,
     recorded_by: 'Rohit Sharma (Selfie + GPS Verified)',
-    selfie_bucket_path: 'Employees Attendence Images/selfies/emp_201/2026-10-22_site1.jpg',
+    selfie_bucket_path: `Employees Attendence Images/emp_201_${SYSTEM_TODAY_DATE}_site1.jpg`,
     location_lat: 12.9698,
     location_lng: 77.75,
     location_address: '12.9698° N, 77.7500° E — Tower A — RCC Core & Formwork, Bengaluru',
@@ -2817,12 +2829,12 @@ export const INITIAL_ATTENDANCE: AttendanceRecord[] = [
     site_id: 2,
     labour_id: null,
     employee_id: 202,
-    attendance_date: '2026-10-22',
+    attendance_date: SYSTEM_TODAY_DATE,
     status: 'PRESENT',
     hours_worked: 8,
     overtime_hours: 0,
     recorded_by: 'Priyanka Patil (Selfie + GPS Verified)',
-    selfie_bucket_path: 'Employees Attendence Images/selfies/emp_202/2026-10-22_site2.jpg',
+    selfie_bucket_path: `Employees Attendence Images/emp_202_${SYSTEM_TODAY_DATE}_site2.jpg`,
     location_lat: 19.1197,
     location_lng: 72.8679,
     location_address: '19.1197° N, 72.8679° E — Pier P-24 to P-38 Viaduct Launching, Mumbai',
@@ -2835,7 +2847,7 @@ export const INITIAL_ATTENDANCE: AttendanceRecord[] = [
     site_id: 3,
     labour_id: null,
     employee_id: 203,
-    attendance_date: '2026-10-22',
+    attendance_date: SYSTEM_TODAY_DATE,
     status: 'ABSENT',
     hours_worked: 0,
     overtime_hours: 0,
@@ -2846,7 +2858,7 @@ export const INITIAL_ATTENDANCE: AttendanceRecord[] = [
     site_id: 1,
     labour_id: 101,
     employee_id: null,
-    attendance_date: '2026-10-21',
+    attendance_date: SYSTEM_YESTERDAY_DATE,
     status: 'PRESENT',
     hours_worked: 8,
     overtime_hours: 0,
@@ -2857,7 +2869,7 @@ export const INITIAL_ATTENDANCE: AttendanceRecord[] = [
     site_id: 1,
     labour_id: 103,
     employee_id: null,
-    attendance_date: '2026-10-21',
+    attendance_date: SYSTEM_YESTERDAY_DATE,
     status: 'PRESENT',
     hours_worked: 9,
     overtime_hours: 1,

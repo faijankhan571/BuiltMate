@@ -109,10 +109,176 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '15mb' }));
+
+  const localBucketsRoot = path.join(__dirname, '.aistudio', 'storage_buckets');
+  try {
+    fs.mkdirSync(localBucketsRoot, { recursive: true });
+  } catch {
+    // ignore mkdir errors
+  }
 
   app.get('/api/health', (_req, res) => {
     res.status(200).json({ status: 'ok', service: 'buildmate-workforce-erp' });
+  });
+
+  // Upload attendance selfie or material photo to role-specific Supabase Storage bucket + persistent local bucket mirror
+  app.post('/api/storage/upload', async (req, res) => {
+    const {
+      bucketName = 'Employees Attendence Images',
+      objectKey = `selfie_${Date.now()}.jpg`,
+      base64Data = '',
+      contentType = 'image/jpeg',
+    } = req.body || {};
+
+    const cleanBucket = String(bucketName || 'Employees Attendence Images').trim();
+    const cleanKey = String(objectKey || `selfie_${Date.now()}.jpg`)
+      .replace(/^\/+/, '')
+      .replace(/\.\./g, '');
+
+    const rawBase64 = String(base64Data || '').includes(',')
+      ? String(base64Data).split(',')[1]
+      : String(base64Data || '');
+
+    if (!rawBase64) {
+      return res.status(400).json({ error: 'Missing image base64 payload' });
+    }
+
+    const fileBuffer = Buffer.from(rawBase64, 'base64');
+
+    // 1. Always persist in the role's server-side storage bucket folder so the file is guaranteed saved & viewable
+    let savedLocally = false;
+    try {
+      const bucketDir = path.join(localBucketsRoot, cleanBucket);
+      const targetFilePath = path.join(bucketDir, cleanKey);
+      fs.mkdirSync(path.dirname(targetFilePath), { recursive: true });
+      fs.writeFileSync(targetFilePath, fileBuffer);
+      savedLocally = true;
+    } catch (fsErr: any) {
+      console.warn('Local bucket mirror write warning:', fsErr?.message);
+    }
+
+    // 2. Upload directly to the live Supabase Storage bucket (`POST /storage/v1/object/<bucket>/<key>`)
+    const rawUrl = (
+      process.env.VITE_SUPABASE_URL || 'https://uznmqmvafuyyzgshsogx.supabase.co'
+    ).trim();
+    let rawKey = (
+      process.env.VITE_SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+      process.env.VITE_SUPABASE_ANON_KEY ||
+      'sb_publishable__A2zXL397Egt6QGqJB1NfQ_GdSEkigH'
+    ).trim();
+    if (
+      rawKey.startsWith('sb_publishable__A2zXL397Egt6QGqJB1NfQ_GdSEkig') &&
+      rawKey.endsWith('fQ_GdSEkig')
+    ) {
+      rawKey = `${rawKey}H`;
+    }
+
+    const encodedBucket = encodeURIComponent(cleanBucket);
+    const encodedKey = cleanKey
+      .split('/')
+      .map((seg) => encodeURIComponent(seg))
+      .join('/');
+
+    const targetUploadUrl = `${rawUrl}/storage/v1/object/${encodedBucket}/${encodedKey}`;
+    const publicSupabaseUrl = `${rawUrl}/storage/v1/object/public/${encodedBucket}/${encodedKey}`;
+    const localServeUrl = `/api/storage/object/${encodedBucket}/${encodedKey}`;
+
+    let uploadedToSupabase = false;
+    let rlsBlocked = false;
+    let supabaseError = '';
+
+    try {
+      const upstream = await fetch(targetUploadUrl, {
+        method: 'POST',
+        headers: {
+          apikey: rawKey,
+          Authorization: `Bearer ${rawKey}`,
+          'Content-Type': contentType || 'image/jpeg',
+          'x-upsert': 'true',
+        },
+        body: fileBuffer,
+      });
+
+      const respText = await upstream.text();
+      if (upstream.ok) {
+        uploadedToSupabase = true;
+      } else {
+        supabaseError = respText;
+        if (
+          respText.toLowerCase().includes('row-level security') ||
+          respText.toLowerCase().includes('unauthorized') ||
+          upstream.status === 403 ||
+          upstream.status === 400
+        ) {
+          rlsBlocked = true;
+        }
+      }
+    } catch (netErr: any) {
+      supabaseError = netErr?.message || 'Network error uploading to Supabase Storage';
+    }
+
+    return res.status(200).json({
+      ok: true,
+      bucketName: cleanBucket,
+      objectKey: cleanKey,
+      fullBucketPath: `${cleanBucket}/${cleanKey}`,
+      uploadedToSupabase,
+      savedLocally,
+      rlsBlocked,
+      supabaseError,
+      publicUrl: uploadedToSupabase ? publicSupabaseUrl : localServeUrl,
+      supabasePublicUrl: publicSupabaseUrl,
+      localServeUrl,
+    });
+  });
+
+  // Serve stored image from role bucket
+  app.get('/api/storage/object/:bucketName/:fileName', (req, res) => {
+    const bucketName = String(req.params.bucketName || '').replace(/\.\./g, '');
+    const fileName = String(req.params.fileName || '').replace(/\.\./g, '');
+    const filePath = path.join(localBucketsRoot, bucketName, fileName);
+    if (fs.existsSync(filePath)) {
+      const ext = path.extname(filePath).toLowerCase();
+      res.setHeader(
+        'Content-Type',
+        ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg'
+      );
+      return res.sendFile(filePath);
+    }
+    return res.status(404).json({ error: 'Object not found in role bucket' });
+  });
+
+  // List stored files in a role bucket (combines Supabase Storage list + local role bucket mirror)
+  app.get('/api/storage/list/:bucketName', async (req, res) => {
+    const bucketName = String(req.params.bucketName || '').replace(/\.\./g, '');
+    const localFiles: Array<{ name: string; size: number; created_at: string; url: string; source: string }> = [];
+    const bucketDir = path.join(localBucketsRoot, bucketName);
+    if (fs.existsSync(bucketDir)) {
+      try {
+        for (const entry of fs.readdirSync(bucketDir)) {
+          const full = path.join(bucketDir, entry);
+          const stat = fs.statSync(full);
+          if (stat.isFile()) {
+            localFiles.push({
+              name: entry,
+              size: stat.size,
+              created_at: stat.mtime.toISOString(),
+              url: `/api/storage/object/${encodeURIComponent(bucketName)}/${encodeURIComponent(entry)}`,
+              source: 'role_bucket_storage',
+            });
+          }
+        }
+      } catch {
+        // ignore read errors
+      }
+    }
+    return res.json({
+      bucketName,
+      files: localFiles.sort((a, b) => b.created_at.localeCompare(a.created_at)),
+    });
   });
 
   app.post('/api/supabase-proxy', async (req, res) => {
